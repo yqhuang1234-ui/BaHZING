@@ -46,6 +46,11 @@
 #' check.
 #' @param return_all_estimates If FALSE (default), results do not include
 #' the dispersion and omega estimates from the BaHZING model.
+#' @param seed Optional seed used to generate per-chain JAGS RNG initial values.
+#' @param parallel Logical; if TRUE, chains can be run in parallel with
+#' parallel::mclapply on supported platforms.
+#' @param n.cores Number of cores to use when parallel is TRUE. If NULL,
+#' cores are detected automatically.
 #' @param ROPE_range Region of practical equivalence (ROPE) for calculating
 #' p_rope. Default is c(-0.1, 0.1).
 #' @return A data frame containing results of the Bayesian analysis, with the
@@ -102,6 +107,9 @@ BaHZING_Model <- function(formatted_data,
                           q = NULL,
                           verbose = TRUE,
                           return_all_estimates = FALSE,
+                          seed = NULL,
+                          parallel = FALSE,
+                          n.cores = NULL,
                           ROPE_range = c(-0.1, 0.1)) {
 
   # 1. Check input data ----
@@ -180,6 +188,23 @@ BaHZING_Model <- function(formatted_data,
   } else {
     profiles <- rbind(rep(counterfactual_profiles[1], P),
                       rep(counterfactual_profiles[2], P))
+  }
+
+  chain_inits <- if (!is.null(seed)) {
+    lapply(seq_len(n.chains), function(i) {
+      list(.RNG.name = "base::Wichmann-Hill",
+           .RNG.seed = seed + i)
+    })
+  } else {
+    NULL
+  }
+
+  if (isTRUE(parallel) && is.null(n.cores)) {
+    detected_cores <- parallel::detectCores(logical = FALSE)
+    if (is.na(detected_cores) || detected_cores < 1) {
+      detected_cores <- 1
+    }
+    n.cores <- max(1, min(n.chains, detected_cores))
   }
 
   # Give warning if using qualtiles but counterfactuals < 0
@@ -473,17 +498,36 @@ BaHZING_Model <- function(formatted_data,
                "species.psi.zero","genus.psi.zero","family.psi.zero",
                "order.psi.zero","class.psi.zero","phylum.psi.zero",
                "disp")
-    model.fit <- jags.model(file=textConnection(BHRM.microbiome),
-                            data=jdata,
-                            n.chains=n.chains,
-                            n.adapt=n.adapt,
-                            quiet=F)
-    update(model.fit, n.iter=n.iter.burnin, progress.bar="text")
-    model.fit <- coda.samples(model=model.fit,
-                              variable.names=var.s,
-                              n.iter=n.iter.sample,
-                              thin=1,
-                              progress.bar="text")
+    if (isTRUE(parallel) && n.cores > 1 && n.chains > 1) {
+      model.fit <- parallel::mclapply(seq_len(n.chains), function(chain_index) {
+        chain_model <- jags.model(file=textConnection(BHRM.microbiome),
+                                  data=jdata,
+                                  n.chains=1,
+                                  n.adapt=n.adapt,
+                                  quiet=F,
+                                  inits=chain_inits[[chain_index]])
+        update(chain_model, n.iter=n.iter.burnin, progress.bar="text")
+        coda.samples(model=chain_model,
+                     variable.names=var.s,
+                     n.iter=n.iter.sample,
+                     thin=1,
+                     progress.bar="text")
+      }, mc.cores = n.cores)
+      model.fit <- do.call(coda::mcmc.list, lapply(model.fit, function(x) x[[1]]))
+    } else {
+      model.fit <- jags.model(file=textConnection(BHRM.microbiome),
+                              data=jdata,
+                              n.chains=n.chains,
+                              n.adapt=n.adapt,
+                              quiet=F,
+                              inits=chain_inits)
+      update(model.fit, n.iter=n.iter.burnin, progress.bar="text")
+      model.fit <- coda.samples(model=model.fit,
+                                variable.names=var.s,
+                                n.iter=n.iter.sample,
+                                thin=1,
+                                progress.bar="text")
+    }
 
   } else {
     ## B. Model without Covariates----
@@ -683,11 +727,30 @@ BaHZING_Model <- function(formatted_data,
                "species.psi.zero","genus.psi.zero","family.psi.zero",
                "order.psi.zero","class.psi.zero","phylum.psi.zero",
                "disp")
-    model.fit <- jags.model(file=textConnection(BHRM.microbiome), data=jdata,
-                            n.chains=n.chains, n.adapt=n.adapt, quiet=F)
-    update(model.fit, n.iter=n.iter.burnin, progress.bar="text")
-    model.fit <- coda.samples(model=model.fit, variable.names=var.s,
-                              n.iter=n.iter.sample, thin=1, progress.bar="text")
+    if (isTRUE(parallel) && n.cores > 1 && n.chains > 1) {
+      model.fit <- parallel::mclapply(seq_len(n.chains), function(chain_index) {
+        chain_model <- jags.model(file=textConnection(BHRM.microbiome),
+                                  data=jdata,
+                                  n.chains=1,
+                                  n.adapt=n.adapt,
+                                  quiet=F,
+                                  inits=chain_inits[[chain_index]])
+        update(chain_model, n.iter=n.iter.burnin, progress.bar="text")
+        coda.samples(model=chain_model,
+                     variable.names=var.s,
+                     n.iter=n.iter.sample,
+                     thin=1,
+                     progress.bar="text")
+      }, mc.cores = n.cores)
+      model.fit <- do.call(coda::mcmc.list, lapply(model.fit, function(x) x[[1]]))
+    } else {
+      model.fit <- jags.model(file=textConnection(BHRM.microbiome), data=jdata,
+                              n.chains=n.chains, n.adapt=n.adapt, quiet=F,
+                              inits=chain_inits)
+      update(model.fit, n.iter=n.iter.burnin, progress.bar="text")
+      model.fit <- coda.samples(model=model.fit, variable.names=var.s,
+                                n.iter=n.iter.sample, thin=1, progress.bar="text")
+    }
   }
 
   # 7. summarize results -------------------------------------------------------
