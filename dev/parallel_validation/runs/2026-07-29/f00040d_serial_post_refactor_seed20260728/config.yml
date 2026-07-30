@@ -1,0 +1,13 @@
+variant: serial_post_refactor
+parallel: no
+seed: 20260728
+git_sha: f00040d
+x:
+- soft_drinks_dietnum
+- diet_soft_drinks_dietnum
+covar: consent_age
+n.chains: 3.0
+note: x and covar match tests/testthat/test-BaHZING_Model.R. n.chains explicitly set
+  to 3 (same as function default) so parallel actually runs chains concurrently. n.adapt,
+  n.iter.burnin, n.iter.sample, exposure_standardization, counterfactual_profiles,
+  ROPE_range left at BaHZING_Model function defaults (not the test file's tiny overrides).

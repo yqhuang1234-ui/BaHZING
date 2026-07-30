@@ -11,54 +11,46 @@
 #' matrices based on taxonomic information. The formatted data is then returned as a list
 #' containing different data frames for further analysis.
 #'
-#' The package relies on the `phyloseq`, `dplyr`, and `stringr` packages for data manipulation,
-#' and also uses functions from `tidyr` to unite taxonomic levels.
+#' The package relies on the `phyloseq`, `dplyr`, and `stringr` packages for data manipulation.
 #'
 #' The main function `Format_BaHZING` is exported and can be accessed by other packages or scripts
 #' that depend on the functionalities provided by this package.
 #'
 #'
 #' @param phyloseq.object A phyloseq object.
+#' @param taxa_levels Character vector naming the taxonomic hierarchy to use,
+#' ordered broadest to narrowest (e.g. `c("Phylum","Class","Order","Family","Genus","Species")`,
+#' the default). These must be column names in `phyloseq.object`'s `tax_table`
+#' (aside from the narrowest level, which is created automatically if absent).
+#' Override this for a dataset with a different taxonomic depth or naming
+#' convention (e.g. a 4-level 16S scheme) - the hierarchical matrices and
+#' downstream model in `BaHZING_Model()` adapt to whatever is supplied here.
+#' The default reproduces BaHZING's original fixed 6-level hierarchy exactly.
 #' @return A list with the following elements:
 #'   - `Table`: Formatted microbiome data as a data frame.
-#'   - `Species.Genus.Matrix`: Data frame for species-genus relationships (optional).
-#'   - `Genus.Family.Matrix`: Data frame for genus-family relationships (optional).
-#'   - `Family.Order.Matrix`: Data frame for family-order relationships (optional).
-#'   - `Order.Class.Matrix`: Data frame for order-class relationships (optional).
-#'   - `Class.Phylum.Matrix`: Data frame for class-phylum relationships (optional).
-#' @details The column names 'Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', and 'Species'
-#' in the tax_table of the phyloseq object should be user-defined and assigned in this function.
-#' The function will use these column names to perform various operations.
-#'
-#' @note The column names 'Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', and 'Species' in the
-#' tax_table are expected to be user-defined and assigned within the function.
+#'   - `taxa_levels`: the taxonomic hierarchy used (echoes the `taxa_levels` argument).
+#'   - One binary incidence matrix per adjacent pair of levels, named
+#'     `"<narrower>.<broader>.Matrix"` (e.g. `Species.Genus.Matrix`,
+#'     `Genus.Family.Matrix`, ... for the default hierarchy).
+#' @details The column names 'Kingdom' (or 'Domain') plus whatever is passed
+#' in `taxa_levels` should be present in the tax_table of the phyloseq object.
 #'
 #' @import phyloseq
 #' @import dplyr
-#' @import tidyr
 #' @import stringr
 #' @importFrom utils globalVariables
 #' @importFrom phyloseq sample_data otu_table tax_table
 #' @importFrom dplyr full_join select mutate %>%
-#' @importFrom tidyr unite
-#' @importFrom stringr str_c
 #' @export
 #' @name Format_BaHZING
 
 # Declare global variables
 utils::globalVariables(c("Domain"))
 
-Format_BaHZING <- function(phyloseq.object) {
-  # Initialize variables to store taxonomic levels and ASV information
-  Kingdom <- NULL    # Variable to store Kingdom taxonomic level
-  Phylum <- NULL     # Variable to store Phylum taxonomic level
-  Class <- NULL      # Variable to store Class taxonomic level
-  Order <- NULL      # Variable to store Order taxonomic level
-  Family <- NULL     # Variable to store Family taxonomic level
-  Genus <- NULL      # Variable to store Genus taxonomic level
-  Species <- NULL    # Variable to store Species taxonomic level
-  ASV <- NULL        # Variable to store Amplicon Sequence Variant information
+Format_BaHZING <- function(phyloseq.object, taxa_levels = default_taxa_levels) {
+  validate_taxa_levels(taxa_levels)
 
+  Kingdom <- NULL    # Variable to store Kingdom taxonomic level
 
   # Check if taxa are stored as rows in the phyloseq object
   if (phyloseq::taxa_are_rows(phyloseq.object)) {
@@ -78,14 +70,13 @@ Format_BaHZING <- function(phyloseq.object) {
     stop("Need > 1 taxonomic level")
   }
 
-
-  # Add taxonomic prefixes to the taxonomic levels in the taxonomic table
+  # Add taxonomic prefixes to the Kingdom/Domain level (hand-written special
+  # case: every taxon has exactly one kingdom, unlike the rest of the
+  # hierarchy below it, which can vary in depth/naming by dataset).
   if ("Kingdom" %in% colnames(taxa.table)) {
     # If 'Kingdom' column is present in the taxonomic table, add 'k__' prefix
     taxa.table <- taxa.table %>%
       mutate(Kingdom=ifelse(grepl("k__",Kingdom),Kingdom,paste0("k__", Kingdom)))
-    # taxa.table <- taxa.table %>%
-    #   mutate(Kingdom=ifelse(grepl("k__NA",Kingdom),NA,Kingdom))
   }
 
   if ("Domain" %in% colnames(taxa.table)) {
@@ -102,129 +93,81 @@ Format_BaHZING <- function(phyloseq.object) {
     stop("Missing Kindom-level information for an ASV/OTU. Remove unidentified bacteria and rerun.")
   }
 
-  if ("Phylum" %in% colnames(taxa.table)) {
-    # If 'Phylum' column is present in the taxonomic table, add 'p__' prefix
-    taxa.table <- taxa.table %>%
-      mutate(Phylum=ifelse(grepl("p__",Phylum),Phylum,paste0("p__", Phylum)))
-    taxa.table <- taxa.table %>%
-      mutate(Phylum=ifelse(grepl("p__NA",Phylum),NA,Phylum))
+  narrowest_level <- taxa_levels[[length(taxa_levels)]]
+
+  # Add taxonomic prefixes to every level in taxa_levels, e.g. "p__" for
+  # Phylum, "g__" for Genus - derived from each level's own first letter, so
+  # this generalizes to custom level names for free.
+  for (lvl in taxa_levels) {
+    if (lvl %in% colnames(taxa.table)) {
+      prefix <- paste0(tolower(substr(lvl, 1, 1)), "__")
+      col <- taxa.table[[lvl]]
+      col <- ifelse(grepl(prefix, col), col, paste0(prefix, col))
+      col <- ifelse(grepl(paste0(prefix, "NA"), col), NA, col)
+      taxa.table[[lvl]] <- col
+    }
   }
 
-  if ("Class" %in% colnames(taxa.table)) {
-    # If 'Class' column is present in the taxonomic table, add 'c__' prefix
-    taxa.table <- taxa.table %>%
-      mutate(Class=ifelse(grepl("c__",Class),Class,paste0("c__", Class)))
-    taxa.table <-taxa.table %>%
-      mutate(Class=ifelse(grepl("c__NA",Class),NA,Class))
+  #If narrowest level not present, create it.
+  if (!(narrowest_level %in% colnames(taxa.table))) {
+    prefix <- paste0(tolower(substr(narrowest_level, 1, 1)), "__")
+    taxa.table[[narrowest_level]] <- paste0("unclassified", seq_len(nrow(taxa.table)))
+    taxa.table[[narrowest_level]] <- paste0(prefix, taxa.table[[narrowest_level]])
+    taxa.table[[narrowest_level]] <- ifelse(grepl(paste0(prefix, "NA"), taxa.table[[narrowest_level]]),
+                                             NA, taxa.table[[narrowest_level]])
   }
 
-  if ("Order" %in% colnames(taxa.table)) {
-    # If 'Order' column is present in the taxonomic table, add 'o__' prefix
-    taxa.table <- taxa.table %>%
-      mutate(Order=ifelse(grepl("o__",Order),Order,paste0("o__", Order)))
-    taxa.table <-taxa.table %>%
-      mutate(Order=ifelse(grepl("o__NA",Order),NA,Order))
+  #Fill in any NAs with unclassified, and remember how many were filled per
+  #level (needed below to keep the narrowest level's duplicate-name
+  #numbering from colliding with its "unclassifiedN" numbering).
+  fill_counts <- setNames(integer(length(taxa_levels)), taxa_levels)
+  for (lvl in taxa_levels) {
+    if (lvl %in% colnames(taxa.table)) {
+      prefix <- paste0(tolower(substr(lvl, 1, 1)), "__")
+      fill_idx <- sort(unique(which(!grepl(prefix, taxa.table[[lvl]]))))
+      fill_counts[lvl] <- length(fill_idx)
+      if (fill_counts[lvl] > 0) {
+        taxa.table[[lvl]][fill_idx] <- paste0(prefix, "unclassified", seq_len(fill_counts[lvl]))
+      }
+    }
   }
 
-  if ("Family" %in% colnames(taxa.table)) {
-    # If 'Family' column is present in the taxonomic table, add 'f__' prefix
-    taxa.table <- taxa.table %>%
-      mutate(Family=ifelse(grepl("f__",Family),Family,paste0("f__", Family)))
-    taxa.table <-taxa.table %>%
-      mutate(Family=ifelse(grepl("f__NA",Family),NA,Family))
+  #Real (classified) names can collide at the narrowest level's resolution -
+  #broader levels already got unique "unclassifiedN" labels above, but two
+  #distinct narrowest-level taxa can otherwise share the same classified name.
+  if (narrowest_level %in% colnames(taxa.table)) {
+    dup_idx <- which(duplicated(taxa.table[[narrowest_level]]))
+    if (length(dup_idx) > 0) {
+      low <- fill_counts[[narrowest_level]] + 1
+      high <- fill_counts[[narrowest_level]] + length(dup_idx)
+      duplicate.names <- paste(taxa.table[[narrowest_level]][dup_idx], "_", low:high)
+      duplicate.names <- str_replace_all(duplicate.names, " ", "")
+      taxa.table[[narrowest_level]][dup_idx] <- duplicate.names
+    }
   }
-
-  if ("Genus" %in% colnames(taxa.table)) {
-    # If 'Genus' column is present in the taxonomic table, add 'g__' prefix
-    taxa.table <- taxa.table %>%
-      mutate(Genus=ifelse(grepl("g__",Genus),Genus,paste0("g__", Genus)))
-    taxa.table <-taxa.table %>%
-      mutate(Genus=ifelse(grepl("g__NA",Genus),NA,Genus))
-  }
-
-  if ("Species" %in% colnames(taxa.table)) {
-    # If 'Species' column is present in the taxonomic table, add 's__' prefix
-    taxa.table <- taxa.table %>%
-      mutate(Species=ifelse(grepl("s__",Species),Species,paste0("s__", Species)))
-    taxa.table <- taxa.table %>%
-      mutate(Species=ifelse(grepl("s__NA",Species),NA,Species))
-  }
-  #If species level not present, create species column.
-  if (length(grep("Species",colnames(taxa.table)))<1) {
-    taxa.table <- taxa.table %>%
-      mutate(Species=paste0("unclassified",row_number()))
-    taxa.table$Species <- paste0("s__",taxa.table$Species)
-    taxa.table <- taxa.table %>%
-      mutate(Species=ifelse(grepl("s__NA",Species),NA,Species))
-  }
-
-  #Fill in any NAs with unclassified
-  if ("Phylum" %in% colnames(taxa.table)) {
-    phylum.fill <- sort(unique(which(!grepl("p__",taxa.table$Phylum))))
-    phylum.count <- length(which(!grepl("p__",taxa.table$Phylum)))
-    unclassified_names <- paste0("p__unclassified", 1:phylum.count)
-    taxa.table[2][phylum.fill,] <- unclassified_names
-  }
-
-  if ("Class" %in% colnames(taxa.table)) {
-    class.fill <- sort(unique(which(!grepl("c__",taxa.table$Class))))
-    class.count <- length(which(!grepl("c__",taxa.table$Class)))
-    unclassified_names <- paste0("c__unclassified", 1:class.count)
-    taxa.table[3][class.fill,] <- unclassified_names
-  }
-
-  if ("Order" %in% colnames(taxa.table)) {
-    order.fill <- sort(unique(which(!grepl("o__",taxa.table$Order))))
-    order.count <- length(which(!grepl("o__",taxa.table$Order)))
-    unclassified_names <- paste0("o__unclassified", 1:order.count)
-    taxa.table[4][order.fill,] <- unclassified_names
-  }
-
-  if ("Family" %in% colnames(taxa.table)) {
-    family.fill <- sort(unique(which(!grepl("f__",taxa.table$Family))))
-    family.count <- length(which(!grepl("f__",taxa.table$Family)))
-    unclassified_names <- paste0("f__unclassified", 1:family.count)
-    taxa.table[5][family.fill,] <- unclassified_names
-  }
-
-  if ("Genus" %in% colnames(taxa.table)) {
-    genus.fill <- sort(unique(which(!grepl("g__",taxa.table$Genus))))
-    genus.count <- length(which(!grepl("g__",taxa.table$Genus)))
-    unclassified_names <- paste0("g__unclassified", 1:genus.count)
-    taxa.table[6][genus.fill,] <- unclassified_names
-  }
-
-  if ("Species" %in% colnames(taxa.table)) {
-    species.fill <- sort(unique(which(!grepl("s__",taxa.table$Species))))
-    species.count <- length(which(!grepl("s__",taxa.table$Species)))
-    unclassified_names <- paste0("s__unclassified", 1:species.count)
-    taxa.table[7][species.fill,] <- unclassified_names
-  }
-
-  if ("Species" %in% colnames(taxa.table)) {
-    species.dups <- which(duplicated(taxa.table$Species))
-    species.dups.length <- length(which(duplicated(taxa.table$Species)))
-    low <- (species.count+1)
-    high <- (species.count+species.dups.length)
-    species.dups.count <- (low:high)
-    duplicate.names <- paste(taxa.table$Species[species.dups],"_",species.dups.count)
-    duplicate.names <- str_replace_all(duplicate.names," ","")
-    taxa.table[7][species.dups,] <- duplicate.names
-  }
-
 
   #Create a name vector for all taxa levels in taxa table
   taxa.names <- colnames(taxa.table)
-  # Perform the unite operation for all specified taxonomic levels
-  ASV.names <- taxa.table %>%
-    unite(ASV, all_of(taxa.names), sep = "_")
+  # Concatenate every level's lineage (Kingdom + all levels up to and
+  # including itself) into that level's own column, e.g. Genus becomes
+  # "k__Bacteria_p__..._g__Blautia". Must proceed narrowest -> broadest: each
+  # step overwrites its own target column in place, and only reads pristine
+  # data because narrower levels are finalized before broader ranges (which
+  # still include them) are built - the range shrinks by exactly the column
+  # just written, every step.
+  kingdom_col <- if ("Kingdom" %in% colnames(taxa.table)) "Kingdom" else character(0)
+  n_levels <- length(taxa_levels)
+  for (i in n_levels:1) {
+    lvl <- taxa_levels[[i]]
+    lineage_cols <- c(kingdom_col, taxa_levels[seq_len(i)])
+    taxa.table[[lvl]] <- apply(taxa.table[lineage_cols], 1, paste, collapse = "_")
+  }
 
-  # Rename the columns of the otu.table with the values from the ASV.names$ASV column
+  ASV.names <- taxa.table[[narrowest_level]]
+
+  # Rename the columns of the otu.table with the values from ASV.names
   table <- otu.table
-  colnames(table) <- ASV.names$ASV
-
-  # Create a key data frame to map the original column names to the ASV names
-  key <- data.frame(names=colnames(otu.table), ASV=ASV.names$ASV)
+  colnames(table) <- ASV.names
 
   # Add an 'id' column to the table and set its values to row names of the table
   table$id <- rownames(table)
@@ -244,131 +187,34 @@ Format_BaHZING <- function(phyloseq.object) {
   table <- table %>%
     select(-id)
 
+  # Build a binary incidence matrix for every adjacent pair of levels (e.g.
+  # Genus x Species, Family x Genus, ...), keyed by hierarchy_matrix_name()
+  # so BaHZING_Model() can look each one up generically by the same
+  # convention this uses to write it.
+  hierarchy_matrices <- list()
+  for (i in seq_len(length(taxa_levels) - 1)) {
+    broader <- taxa_levels[[i]]
+    narrower <- taxa_levels[[i + 1]]
+    if (narrower %in% colnames(taxa.table) && broader %in% colnames(taxa.table)) {
+      unique_broader <- unique(taxa.table[[broader]])
+      unique_narrower <- unique(taxa.table[[narrower]])
 
-  # Combine taxonomic levels from 'Kingdom' to 'Species' into their respective columns
-  # The 'unite()' function concatenates the taxonomic levels into a single column for each taxonomic rank.
-  taxa.table <- taxa.table %>%
-    unite(Species, Kingdom:Species, remove = FALSE) %>%
-    unite(Genus, Kingdom:Genus, remove = FALSE) %>%
-    unite(Family, Kingdom:Family, remove = FALSE) %>%
-    unite(Order, Kingdom:Order, remove = FALSE) %>%
-    unite(Class, Kingdom:Class, remove = FALSE) %>%
-    unite(Phylum, Kingdom:Phylum, remove = FALSE)
+      m <- matrix(0, nrow = length(unique_broader), ncol = length(unique_narrower),
+                  dimnames = list(unique_broader, unique_narrower))
+      m[cbind(match(taxa.table[[broader]], unique_broader),
+              match(taxa.table[[narrower]], unique_narrower))] <- 1
 
-
-  # Create a binary matrix ('speciesgenus') to represent the relationship between species and genera
-  if ("Species" %in% colnames(taxa.table) & "Genus" %in% colnames(taxa.table)) {
-
-    unique_genera <- unique(taxa.table$Genus)
-    unique_species <- unique(taxa.table$Species)
-
-    # Create a binary matrix with rows representing unique genera and columns representing unique species
-    speciesgenus <- matrix(0, nrow = length(unique_genera), ncol = length(unique_species),
-                           dimnames = list(unique_genera, unique_species))
-
-    # Populate the matrix with binary values indicating species presence in each genus
-    speciesgenus[cbind(match(taxa.table$Genus, unique_genera),
-                       match(taxa.table$Species, unique_species))] <- 1
+      hierarchy_matrices[[hierarchy_matrix_name(taxa_levels, i)]] <- m
+    }
   }
 
-
-  # Create a binary matrix ('genusfamily') to represent the relationship between genera and families
-  if ("Genus" %in% colnames(taxa.table) & "Family" %in% colnames(taxa.table)) {
-
-    unique_families <- unique(taxa.table$Family)
-    unique_genera <- unique(taxa.table$Genus)
-
-    # Create a binary matrix with rows representing unique families and columns representing unique genera
-    genusfamily <- matrix(0, nrow = length(unique_families), ncol = length(unique_genera),
-                          dimnames = list(unique_families, unique_genera))
-
-    # Populate the matrix with binary values indicating the presence of genera in each family
-    genusfamily[cbind(match(taxa.table$Family, unique_families),
-                      match(taxa.table$Genus, unique_genera))] <- 1
-  }
-
-
-  # Create binary matrix ('familyorder') representing the relationship between Families and Orders
-  if ("Family" %in% colnames(taxa.table) & "Order" %in% colnames(taxa.table)) {
-
-    unique_orders <- unique(taxa.table$Order)
-    unique_families <- unique(taxa.table$Family)
-
-    # Create a binary matrix with rows representing unique Orders and columns representing unique Families
-    familyorder <- matrix(0, nrow = length(unique_orders), ncol = length(unique_families),
-                          dimnames = list(unique_orders, unique_families))
-
-    # Populate the matrix with binary values indicating the presence of Families in each Order
-    familyorder[cbind(match(taxa.table$Order, unique_orders),
-                      match(taxa.table$Family, unique_families))] <- 1
-  }
-
-  # Create binary matrix ('orderclass') representing the relationship between Orders and Class
-  if ("Order" %in% colnames(taxa.table) & "Class" %in% colnames(taxa.table)) {
-
-    unique_classes <- unique(taxa.table$Class)
-    unique_orders <- unique(taxa.table$Order)
-
-    # Create a binary matrix with rows representing unique Classes and columns representing unique Orders
-    orderclass <- matrix(0, nrow = length(unique_classes), ncol = length(unique_orders),
-                         dimnames = list(unique_classes, unique_orders))
-
-    # Populate the matrix with binary values indicating the presence of Orders in each Class
-    orderclass[cbind(match(taxa.table$Class, unique_classes),
-                     match(taxa.table$Order, unique_orders))] <- 1
-  }
-
-
-  # Create binary matrix ('classphylum') representing the relationship between Classes and Phyla
-  if ("Class" %in% colnames(taxa.table) & "Phylum" %in% colnames(taxa.table)) {
-
-    unique_phyla <- unique(taxa.table$Phylum)
-    unique_classes <- unique(taxa.table$Class)
-
-    # Create a binary matrix with rows representing unique Phyla and columns representing unique Classes
-    classphylum <- matrix(0, nrow = length(unique_phyla), ncol = length(unique_classes),
-                          dimnames = list(unique_phyla, unique_classes))
-
-    # Populate the matrix with binary values indicating the presence of Classes in each Phylum
-    classphylum[cbind(match(taxa.table$Phylum, unique_phyla),
-                      match(taxa.table$Class, unique_classes))] <- 1
-  }
-
-  # Check if the dataframe named 'table' exists in the current environment
-  # if (!exists("table")) {
-  #   # If the dataframe 'table' does not exist, raise an error and stop the function
-  #   stop("Missing 'Table' dataframe")
-  # }
-
-  # Create a list named 'Object' to store different matrices representing relationships between taxonomic levels
+  # Create a list named 'Object' to store the formatted table, the
+  # taxa_levels used to build it, and every hierarchy matrix
   Object <- list()
-
-  # Store the 'table' dataframe in the 'Object' list with the key "Table"
   Object[["Table"]] <- list(table)
-
-  # Check if the 'speciesgenus' matrix exists, if so, store it in the 'Object' list with the key "Species.Genus.Matrix"
-  if (exists("speciesgenus")) {
-    Object[["Species.Genus.Matrix"]] <- speciesgenus
-  }
-
-  # Check if the 'genusfamily' matrix exists, if so, store it in the 'Object' list with the key "Genus.Family.Matrix"
-  if (exists("genusfamily")) {
-    Object[["Genus.Family.Matrix"]] <- genusfamily
-  }
-
-  # Check if the 'familyorder' matrix exists, if so, store it in the 'Object' list with the key "Family.Order.Matrix"
-  if (exists("familyorder")) {
-    Object[["Family.Order.Matrix"]] <- familyorder
-  }
-
-  # Check if the 'orderclass' matrix exists, if so, store it in the 'Object' list with the key "Order.Class.Matrix"
-  if (exists("orderclass")) {
-    Object[["Order.Class.Matrix"]] <- orderclass
-  }
-
-  # Check if the 'classphylum' matrix exists, if so, store it in the 'Object' list with the key "Class.Phylum.Matrix"
-  if (exists("classphylum")) {
-    Object[["Class.Phylum.Matrix"]] <- classphylum
+  Object[["taxa_levels"]] <- taxa_levels
+  for (nm in names(hierarchy_matrices)) {
+    Object[[nm]] <- hierarchy_matrices[[nm]]
   }
 
   # Return the 'Object' list containing the matrices representing relationships between taxonomic levels

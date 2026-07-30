@@ -2,3 +2,9 @@
 .Rhistory
 .RData
 .Ruserdata
+doc/
+vignettes/*.html
+vignettes/*.R
+inst/doc
+*.Rcheck/
+*.tar.gz

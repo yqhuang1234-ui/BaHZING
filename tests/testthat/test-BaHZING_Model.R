@@ -129,3 +129,36 @@ test_that("test BaHZING_Model", {
     "counterfactual_profiles must be numeric.")
 
 })
+
+test_that("BaHZING_Model runs end-to-end with a custom, differently-sized taxa_levels", {
+  data("iHMP_Reduced")
+
+  # 4-level hierarchy (skips Class/Order), real column names from iHMP_Reduced
+  custom_levels <- c("Phylum", "Family", "Genus", "Species")
+  formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = custom_levels)
+
+  x <- c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")
+
+  results <- BaHZING_Model(formatted_data = formatted_data,
+                           x = x,
+                           covar = NULL,
+                           exposure_standardization = "standard_normal",
+                           n.chains = 1,
+                           n.adapt = 60,
+                           n.iter.burnin = 2,
+                           n.iter.sample = 2,
+                           counterfactual_profiles = c(-0.5, 0.5))
+
+  testthat::expect_equal(ncol(results), 11)
+
+  # domain should only ever contain this custom hierarchy's own level names -
+  # no leftover "Class"/"Order" from the default 6-level scheme, and no NA
+  # from a mis-resolved row.
+  testthat::expect_true(all(unique(results$domain) %in% custom_levels))
+  testthat::expect_false(any(c("Class", "Order") %in% unique(results$domain)))
+  testthat::expect_false(anyNA(results$domain))
+
+  # Every level in the custom hierarchy should actually show up in the
+  # output - i.e. the resolver isn't silently collapsing levels together.
+  testthat::expect_true(all(custom_levels %in% unique(results$domain)))
+})

@@ -4,9 +4,10 @@ test_that("test Format_BaHZING", {
   # Format microbiome data
   formatted_data <- Format_BaHZING(iHMP_Reduced)
   # Test format data
-  testthat::expect_equal(object = length(formatted_data), expected = 6)
+  testthat::expect_equal(object = length(formatted_data), expected = 7)
   testthat::expect_true(is.list(formatted_data))
   testthat::expect_true("Table" %in% names(formatted_data))
+  testthat::expect_equal(formatted_data$taxa_levels, default_taxa_levels)
 })
 
 
@@ -23,6 +24,21 @@ test_that("Error thrown when taxonomic levels are less than 2", {
   testthat::expect_error(Format_BaHZING(PS), "Need > 1 taxonomic level")
   })
 
+
+test_that("Format_BaHZING generalizes to a custom, differently-sized taxa_levels", {
+  data("iHMP_Reduced")
+
+  custom_levels <- c("Phylum", "Family", "Genus", "Species")
+  formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = custom_levels)
+
+  # 1 Table + 1 taxa_levels + 3 adjacent-pair matrices for a 4-level hierarchy
+  testthat::expect_equal(length(formatted_data), 5)
+  testthat::expect_equal(formatted_data$taxa_levels, custom_levels)
+  testthat::expect_true(all(c("Family.Phylum.Matrix", "Genus.Family.Matrix",
+                              "Species.Genus.Matrix") %in% names(formatted_data)))
+  # No Class/Order levels in this mapping, so no matrix should reference them
+  testthat::expect_false(any(grepl("Class|Order", names(formatted_data))))
+})
 
 test_that("If species level not present, create species column", {
 
