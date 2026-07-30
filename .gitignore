@@ -8,3 +8,4 @@ vignettes/*.R
 inst/doc
 *.Rcheck/
 *.tar.gz
+.DS_Store
