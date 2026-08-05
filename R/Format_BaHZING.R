@@ -59,6 +59,21 @@ Format_BaHZING <- function(phyloseq.object, taxa_levels = default_taxa_levels) {
     phyloseq.object <- t(phyloseq.object)
   }
 
+  # Downstream (colnames(table) <- ASV.names) renames otu.table's columns
+  # purely by POSITION, assuming otu.table column i and taxa.table row i
+  # describe the same taxon - true because both are extracted from the same
+  # phyloseq.object, and phyloseq keeps every component of one object
+  # aligned to that object's own canonical taxon order. That alignment is
+  # never itself re-verified though, so check it explicitly here, on the
+  # phyloseq accessors directly (BEFORE data.frame() below, whose default
+  # check.names=TRUE sanitizes column names - turning ";"/" " into "." -
+  # but leaves row names untouched, which would make an otherwise-correctly
+  # -aligned pair look mismatched if compared after coercion): a malformed
+  # or unusually-constructed phyloseq object would otherwise silently
+  # mislabel every taxon instead of erroring.
+  stopifnot(identical(colnames(phyloseq::otu_table(phyloseq.object)),
+                      rownames(phyloseq::tax_table(phyloseq.object))))
+
   # Extract metadata, OTU table, and taxonomic table from the phyloseq object
   meta.data <- data.frame(phyloseq::sample_data(phyloseq.object))  # Data frame containing metadata information
   otu.table <- data.frame(phyloseq::otu_table(phyloseq.object))    # Data frame containing OTU (Operational Taxonomic Unit) table
