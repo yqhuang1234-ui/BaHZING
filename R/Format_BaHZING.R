@@ -112,11 +112,19 @@ Format_BaHZING <- function(phyloseq.object, taxa_levels = default_taxa_levels) {
 
   # Add taxonomic prefixes to every level in taxa_levels, e.g. "p__" for
   # Phylum, "g__" for Genus - derived from each level's own first letter, so
-  # this generalizes to custom level names for free.
+  # this generalizes to custom level names for free. Any existing
+  # "<letter>__" prefix is stripped first - values coming from a real
+  # classifier pipeline (QIIME2/GTDB-Tk/etc.) commonly already carry the
+  # standard p__/c__/o__/f__/g__/s__ convention baked in, which only happens
+  # to match what gets computed here when taxa_levels uses the standard
+  # level names. With custom names (e.g. "Alpha" -> "a__"), not stripping
+  # first would stack the new prefix on top of the old one instead of
+  # replacing it (e.g. "a__p__Firmicutes_A" instead of "a__Firmicutes_A").
   for (lvl in taxa_levels) {
     if (lvl %in% colnames(taxa.table)) {
       prefix <- paste0(tolower(substr(lvl, 1, 1)), "__")
       col <- taxa.table[[lvl]]
+      col <- sub("^[A-Za-z]__", "", col)
       col <- ifelse(grepl(prefix, col), col, paste0(prefix, col))
       col <- ifelse(grepl(paste0(prefix, "NA"), col), NA, col)
       taxa.table[[lvl]] <- col
