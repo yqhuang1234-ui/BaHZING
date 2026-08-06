@@ -22,20 +22,19 @@
         delta.zero[r,q] ~ dnorm(0, 1.0E-02)
       }
 
-      # prior on exposure effects
       for(p in 1:P) {
-        species.beta[r,p] ~ dnorm(mu.species[r,p], tau[r])
-        mu.species[r,p] <- inprod(genus.beta[1:Genus.R,p], GenusData[r,1:Genus.R])
+        species.beta[r,p] ~ dnorm(mu.genus[r,p], species.tau[r])
+        mu.genus[r,p] <- inprod(genus.beta[1:Genus.R,p], GenusData[r,1:Genus.R])
         #Zero inflation component
-        species.beta.zero[r,p] ~ dnorm(mu.species.zero[r,p], tau.zero[r])
-        mu.species.zero[r,p] <- inprod(genus.beta.zero[1:Genus.R,p], GenusData[r,1:Genus.R])
+        species.beta.zero[r,p] ~ dnorm(mu.genus.zero[r,p], species.tau.zero[r])
+        mu.genus.zero[r,p] <- inprod(genus.beta.zero[1:Genus.R,p], GenusData[r,1:Genus.R])
       }
 
       # prior on precision
-      tau[r] <- 1/(sigma[r]*sigma[r])
-      sigma[r] ~ dunif(0,3)
-      tau.zero[r] <- 1/(sigma.zero[r]*sigma.zero[r])
-      sigma.zero[r] ~ dunif(0,3)
+      species.tau[r] <- 1/(species.sigma[r]*species.sigma[r])
+      species.sigma[r] ~ dunif(0,3)
+      species.tau.zero[r] <- 1/(species.sigma.zero[r]*species.sigma.zero[r])
+      species.sigma.zero[r] ~ dunif(0,3)
 
       # g-estimation
       species.eta.low[r] <- inprod(species.beta[r,1:P], profiles[1,1:P])

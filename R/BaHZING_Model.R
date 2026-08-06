@@ -159,16 +159,11 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #'   are always named after the level itself.
 #' @param idx Character. The JAGS loop index variable for this level, e.g.
 #'   `"g.r"`.
-#' @param tau_prefix Character. Prefix used for the precision nodes
-#'   (`<tau_prefix>tau`/`<tau_prefix>sigma`). Defaults to `paste0(level,".")`
-#'   (e.g. genus's precision nodes are `genus.tau`/`genus.sigma`) - overridden
-#'   to `""` by [.bahzing_narrowest_level_block()], since the narrowest
-#'   level's precision nodes are unprefixed (`tau`/`sigma`) in BaHZING's
-#'   original model, unlike every other level.
 #' @return A length-1 character string ending in a trailing newline.
 #' @keywords internal
 #' @noRd
-.bahzing_precision_gestimation_block <- function(level, idx, tau_prefix = paste0(level, ".")) {
+.bahzing_precision_gestimation_block <- function(level, idx) {
+  tau_prefix <- paste0(level, ".")
   glue::glue(
 "      # prior on precision
       <<tau_prefix>>tau[<<idx>>] <- 1/(<<tau_prefix>>sigma[<<idx>>]*<<tau_prefix>>sigma[<<idx>>])
@@ -198,9 +193,14 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' prior falls back to a fixed `dnorm(0, tau)` instead.
 #'
 #' Shared by every level including the narrowest level, via
-#' [.bahzing_level_block()] and [.bahzing_narrowest_level_block()] respectively - see
-#' `mu_owner` below for why that level needs one extra parameter to reuse
-#' this.
+#' [.bahzing_level_block()] and [.bahzing_narrowest_level_block()]
+#' respectively - both the borrowed-mean node name (`mu.<parent>`) and the
+#' precision-node prefix (`<level>.tau`/`<level>.sigma`) now follow the same
+#' convention for every level with no per-role override, unlike BaHZING's
+#' original hand-written model (which named the narrowest level's precision
+#' nodes bare `tau`/`sigma` and its borrowed-mean node `mu.species` instead
+#' of `mu.genus`) - safe to make consistent since none of `tau`/`sigma`/
+#' `mu.*` are ever monitored/extracted nodes.
 #'
 #' @param level Character. This level's variable-name prefix (e.g.
 #'   `"genus"`), used for `<level>.beta`/`<level>.tau`.
@@ -215,35 +215,19 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' @param parent_data Character or `NULL`. The taxonomy indicator matrix
 #'   linking this level's taxa to the parent's (e.g. `"FamilyData"`).
 #'   Required whenever `parent` is supplied.
-#' @param mu_owner Character. Whose name labels the intermediate "borrowed
-#'   mean" node (`mu.<mu_owner>`). Defaults to `parent`, matching the
-#'   original model's convention for mid-hierarchy levels (e.g. genus's node
-#'   is `mu.family`, named after *its* parent). The narrowest level is the
-#'   one exception in the original model - its node is `mu.species` (named
-#'   after *itself*, not `mu.genus`) - so
-#'   [.bahzing_narrowest_level_block()] overrides this explicitly to its own level
-#'   name. This is a naming inconsistency inherited from the original model,
-#'   preserved rather than "fixed", since `mu.*` is never a monitored/
-#'   extracted node - only its label differs, not the value.
-#' @param comment Character or `NULL`. If supplied, prepended as a standalone
-#'   comment line above the `for(p in 1:P)` loop.
 #' @return A length-1 character string ending in a trailing newline.
 #' @keywords internal
 #' @noRd
 .bahzing_exposure_prior_block <- function(level, idx, parent = NULL, parent_R = NULL,
-                                            parent_data = NULL, mu_owner = parent,
-                                            comment = NULL, tau_prefix = paste0(level, ".")) {
-  # plain paste0, not glue - glue's default .trim strips leading whitespace
-  # and the trailing newline, which would collapse this onto the same line
-  # as whatever follows it.
-  comment_line <- if (!is.null(comment)) paste0("      # ", comment, "\n") else ""
+                                            parent_data = NULL) {
+  tau_prefix <- paste0(level, ".")
   body <- if (!is.null(parent)) {
     glue::glue(
-"        <<level>>.beta[<<idx>>,p] ~ dnorm(mu.<<mu_owner>>[<<idx>>,p], <<tau_prefix>>tau[<<idx>>])
-        mu.<<mu_owner>>[<<idx>>,p] <- inprod(<<parent>>.beta[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
+"        <<level>>.beta[<<idx>>,p] ~ dnorm(mu.<<parent>>[<<idx>>,p], <<tau_prefix>>tau[<<idx>>])
+        mu.<<parent>>[<<idx>>,p] <- inprod(<<parent>>.beta[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
         #Zero inflation component
-        <<level>>.beta.zero[<<idx>>,p] ~ dnorm(mu.<<mu_owner>>.zero[<<idx>>,p], <<tau_prefix>>tau.zero[<<idx>>])
-        mu.<<mu_owner>>.zero[<<idx>>,p] <- inprod(<<parent>>.beta.zero[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
+        <<level>>.beta.zero[<<idx>>,p] ~ dnorm(mu.<<parent>>.zero[<<idx>>,p], <<tau_prefix>>tau.zero[<<idx>>])
+        mu.<<parent>>.zero[<<idx>>,p] <- inprod(<<parent>>.beta.zero[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
 ", .open = "<<", .close = ">>", .trim = FALSE)
   } else {
     glue::glue(
@@ -253,7 +237,7 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 ", .open = "<<", .close = ">>", .trim = FALSE)
   }
   glue::glue(
-"<<comment_line>>      for(p in 1:P) {
+"      for(p in 1:P) {
 <<body>>      }
 ", .open = "<<", .close = ">>", .trim = FALSE)
 }
@@ -318,13 +302,12 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' [.bahzing_level_vars()] - the parent is always `i - 1` (`n >= 2` is
 #' enforced by `validate_taxa_levels()`, so a parent always exists here).
 #'
-#' Reuses the same two shared sub-block generators every other level uses:
-#' [.bahzing_exposure_prior_block()] (with `mu_owner = level` and a
-#' `"prior on exposure effects"` comment, matching the original model's
-#' species-specific naming/comment conventions) and
-#' [.bahzing_precision_gestimation_block()] (with `tau_prefix = ""`, since
-#' this level's precision nodes are unprefixed in the original model, unlike
-#' every other level - see that function's docs).
+#' Reuses the same two shared sub-block generators every other level uses,
+#' called exactly the same way as [.bahzing_level_block()] calls them - this
+#' level's borrowed-mean and precision-node naming now follows the same
+#' convention as every other level (see [.bahzing_exposure_prior_block()]'s
+#' docs for why that's safe, a deliberate departure from BaHZING's original
+#' hand-written model's species-specific naming).
 #'
 #' @param taxa_levels Character vector naming the taxonomic hierarchy,
 #'   ordered broadest to narrowest.
@@ -358,10 +341,8 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 " else ""
 
   exposure_prior <- .bahzing_exposure_prior_block(level, "r", parent = parent$level,
-                                                    parent_R = parent$R, parent_data = parent$data,
-                                                    mu_owner = level, tau_prefix = "",
-                                                    comment = "prior on exposure effects")
-  precision_gestim <- .bahzing_precision_gestimation_block(level, "r", tau_prefix = "")
+                                                    parent_R = parent$R, parent_data = parent$data)
+  precision_gestim <- .bahzing_precision_gestimation_block(level, "r")
 
   glue::glue(
 "    for(r in 1:R) {

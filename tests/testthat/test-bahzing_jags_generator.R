@@ -1,3 +1,15 @@
+# NOTE: the fixtures below are not a byte-for-byte copy of BaHZING's original
+# hand-written model text - one deliberate change was made on top of it. The
+# original always named the narrowest (species-role) level's precision nodes
+# bare `tau`/`sigma` (every other level prefixes them, e.g. `genus.tau`) and
+# its borrowed-mean node `mu.species` (named after itself, instead of
+# `mu.genus`, the parent-naming convention every other level follows). Both
+# are legacy inconsistencies with no functional weight - `tau`/`sigma`/`mu.*`
+# are never monitored/extracted JAGS nodes - so they were made consistent
+# with every other level's naming convention rather than preserved. The
+# fixtures reflect that change; everything else here still matches the
+# original model exactly.
+
 # Normalizes JAGS text for structural comparison: strips "#..."-to-end-of-line
 # comments (JAGS ignores these entirely - they carry no statistical meaning,
 # and the original hand-written model text is inconsistent in its comment
@@ -44,10 +56,13 @@ test_that(".bahzing_build_model_text places the terminal (no-parent) block at th
 
   # Narrowest level (ASV, this hierarchy's data-likelihood role) should have
   # the actual data likelihood and borrow its prior mean from its parent,
-  # Genus - not from a hardcoded "genus"/"Genus.R"/"GenusData".
+  # Genus - not from a hardcoded "genus"/"Genus.R"/"GenusData". The borrowed-
+  # mean node is named after the parent (mu.genus), same convention every
+  # other level uses - not mu.asv (named after itself), which is what
+  # BaHZING's original hand-written model did only for the narrowest level.
   expect_true(grepl("Y\\[i,r\\] ~ dnegbin", generated))
   expect_true(grepl("asv\\.beta\\[r,1:P\\]", generated))
-  expect_true(grepl("mu\\.asv\\[r,p\\] <- inprod\\(genus\\.beta\\[1:Genus\\.R,p\\], GenusData\\[r,1:Genus\\.R\\]\\)", generated))
+  expect_true(grepl("mu\\.genus\\[r,p\\] <- inprod\\(genus\\.beta\\[1:Genus\\.R,p\\], GenusData\\[r,1:Genus\\.R\\]\\)", generated))
 
   # Mid-hierarchy level (Family) should borrow from its parent (Phylum)
   expect_true(grepl("mu\\.phylum\\[f\\.r,p\\] <- inprod\\(phylum\\.beta\\[1:Phylum\\.R,p\\], PhylumData\\[f\\.r,1:Phylum\\.R\\]\\)", generated))
