@@ -558,8 +558,19 @@ BaHZING_Model <- function(formatted_data,
   validate_taxa_levels(taxa_levels)
   narrowest_level <- taxa_level_name(taxa_levels, length(taxa_levels))
 
+  # Which columns of exposure_covar_dat are taxon-count (outcome) data,
+  # read directly from Format_BaHZING()'s own authoritative record rather
+  # than inferred via string-matching (e.g. assuming every such column
+  # contains "k__", which silently breaks if Kingdom/Domain isn't part of
+  # the input taxonomy at all - Format_BaHZING() already computes this
+  # exact list when it builds these columns, so there's no need to guess).
+  taxon_columns <- formatted_data$taxon_columns
+  if (is.null(taxon_columns) || length(taxon_columns) == 0) {
+    stop("formatted_data has no $taxon_columns; regenerate it with the current Format_BaHZING().")
+  }
+
   #Create outcome dataframe
-  Y <- exposure_covar_dat[, grep("k__", names(exposure_covar_dat))]
+  Y <- exposure_covar_dat[, taxon_columns]
   N <- nrow(Y)
   R <- ncol(Y)
 
@@ -579,7 +590,7 @@ BaHZING_Model <- function(formatted_data,
   }
 
   ## Create Library Size Offset
-  L <- exposure_covar_dat[, grep("k__", names(exposure_covar_dat))]
+  L <- exposure_covar_dat[, taxon_columns]
   L <- L %>%
     mutate(LibrarySize=rowSums(across(everything())))
   L <- L %>%

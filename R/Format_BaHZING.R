@@ -89,8 +89,13 @@ Format_BaHZING <- function(phyloseq.object, taxa_levels = default_taxa_levels) {
   # case: every taxon has exactly one kingdom, unlike the rest of the
   # hierarchy below it, which can vary in depth/naming by dataset).
   if ("Kingdom" %in% colnames(taxa.table)) {
-    # If 'Kingdom' column is present in the taxonomic table, add 'k__' prefix
+    # If 'Kingdom' column is present in the taxonomic table, add 'k__' prefix.
+    # Strip any existing "<letter>__" prefix first (e.g. "d__" left over from
+    # a SILVA/QIIME2-style source that wasn't also named "Domain") - without
+    # this, a value already carrying a different prefix would get "k__"
+    # stacked on top instead of replaced (e.g. "k__d__Bacteria").
     taxa.table <- taxa.table %>%
+      mutate(Kingdom=sub("^[A-Za-z]__", "", Kingdom)) %>%
       mutate(Kingdom=ifelse(grepl("k__",Kingdom),Kingdom,paste0("k__", Kingdom)))
   }
 
@@ -232,10 +237,27 @@ Format_BaHZING <- function(phyloseq.object, taxa_levels = default_taxa_levels) {
   }
 
   # Create a list named 'Object' to store the formatted table, the
-  # taxa_levels used to build it, and every hierarchy matrix
+  # taxa_levels used to build it, every hierarchy matrix, and the exact set
+  # of Table's columns that are taxon-count (outcome) data - so
+  # BaHZING_Model() can select them directly instead of having to guess via
+  # string-matching against an implementation detail (e.g. assuming every
+  # outcome column contains "k__", which silently breaks if Kingdom/Domain
+  # isn't part of the input taxonomy at all).
+  #
+  # make.names(..., unique = TRUE), not the raw ASV.names: BaHZING_Model()
+  # (and any other caller) reconstructs Table via data.frame(formatted_data$Table),
+  # whose default check.names=TRUE silently sanitizes non-syntactic column
+  # names (e.g. a literal space in a species name becomes "."). table's own
+  # colnames were set directly via colnames(table) <- ASV.names, which
+  # bypasses that sanitization - so the raw ASV.names would otherwise not
+  # match what the columns are actually named by the time a consumer reads
+  # them back out. Applying the same sanitization here keeps this list
+  # consistent with reality instead of with an intermediate representation
+  # nothing downstream actually uses.
   Object <- list()
   Object[["Table"]] <- list(table)
   Object[["taxa_levels"]] <- taxa_levels
+  Object[["taxon_columns"]] <- make.names(ASV.names, unique = TRUE)
   for (nm in names(hierarchy_matrices)) {
     Object[[nm]] <- hierarchy_matrices[[nm]]
   }

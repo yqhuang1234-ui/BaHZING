@@ -4,10 +4,11 @@ test_that("test Format_BaHZING", {
   # Format microbiome data
   formatted_data <- Format_BaHZING(iHMP_Reduced)
   # Test format data
-  testthat::expect_equal(object = length(formatted_data), expected = 7)
+  testthat::expect_equal(object = length(formatted_data), expected = 8)
   testthat::expect_true(is.list(formatted_data))
   testthat::expect_true("Table" %in% names(formatted_data))
   testthat::expect_equal(formatted_data$taxa_levels, default_taxa_levels)
+  testthat::expect_true("taxon_columns" %in% names(formatted_data))
 })
 
 
@@ -31,8 +32,8 @@ test_that("Format_BaHZING generalizes to a custom, differently-sized taxa_levels
   custom_levels <- c("Phylum", "Family", "Genus", "Species")
   formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = custom_levels)
 
-  # 1 Table + 1 taxa_levels + 3 adjacent-pair matrices for a 4-level hierarchy
-  testthat::expect_equal(length(formatted_data), 5)
+  # 1 Table + 1 taxa_levels + 1 taxon_columns + 3 adjacent-pair matrices for a 4-level hierarchy
+  testthat::expect_equal(length(formatted_data), 6)
   testthat::expect_equal(formatted_data$taxa_levels, custom_levels)
   testthat::expect_true(all(c("Family.Phylum.Matrix", "Genus.Family.Matrix",
                               "Species.Genus.Matrix") %in% names(formatted_data)))
@@ -60,5 +61,24 @@ test_that("If species level not present, create species column", {
                               colnames(taxa_table_result)[ncol(taxa_table_result)-10]))
   testthat::expect_true(grepl("s__unclassified",
                               colnames(taxa_table_result)[ncol(taxa_table_result)-20]))
+})
+
+test_that("a literal 'Kingdom' column carrying un-converted d__ values does not stack prefixes", {
+  data("iHMP_Reduced")
+
+  # iHMP_Reduced's kingdom-rank column is named "Domain", with SILVA/QIIME2-
+  # style "d__" values - rename the column to "Kingdom" directly (bypassing
+  # the Domain-specific d__ -> k__ conversion branch) without touching the
+  # underlying values, so they're still "d__"-prefixed under the "Kingdom" name.
+  PS <- iHMP_Reduced
+  tt <- tax_table(PS)
+  colnames(tt)[colnames(tt) == "Domain"] <- "Kingdom"
+  tax_table(PS) <- tt
+
+  formatted_data <- Format_BaHZING(PS)
+
+  # Should be a single clean "k__" prefix, not stacked "k__d__"
+  testthat::expect_true(all(grepl("^k__(?!d__)", formatted_data$taxon_columns, perl = TRUE)))
+  testthat::expect_false(any(grepl("^k__d__", formatted_data$taxon_columns)))
 })
 
