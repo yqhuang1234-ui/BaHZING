@@ -118,12 +118,41 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 # adjacent fragments onto the same line wherever one block's output is
 # spliced into another.
 
+#' Derive the standard JAGS identifier names for one taxa_levels position
+#'
+#' Single source of truth for the level-name -> JAGS-identifier convention
+#' used throughout this file (mirrors [hierarchy_matrix_name()]'s role for
+#' the incidence-matrix naming convention in `taxa_levels.R`): a level's
+#' lowercase variable-name prefix, its proper-case label (for comments/
+#' taxon-count scalar names), its loop index variable, its taxon-count
+#' scalar name, and its incidence-matrix data variable name.
+#'
+#' @param taxa_levels Character vector, broadest to narrowest.
+#' @param i Integer position to look up.
+#' @return A list with elements `level` (lowercase prefix, e.g. `"genus"`),
+#'   `label` (proper case, e.g. `"Genus"`), `idx` (loop index variable, e.g.
+#'   `"g.r"`), `R` (taxon-count scalar name, e.g. `"Genus.R"`), and `data`
+#'   (incidence-matrix variable name, e.g. `"GenusData"`).
+#' @keywords internal
+#' @noRd
+.bahzing_level_vars <- function(taxa_levels, i) {
+  label <- taxa_level_name(taxa_levels, i)
+  level <- tolower(label)
+  list(
+    level = level,
+    label = label,
+    idx   = paste0(substr(level, 1, 1), ".r"),
+    R     = paste0(label, ".R"),
+    data  = paste0(label, "Data")
+  )
+}
+
 #' Build the precision-prior and g-estimation lines for one taxonomic level
 #'
 #' Generates the JAGS lines for one level's precision priors (count-model and
 #' zero-inflation dispersion) and its g-estimation block (the mixture
 #' contrast computed from the low/high counterfactual `profiles`). Shared by
-#' every level via [.bahzing_level_block()] and [.bahzing_species_block()].
+#' every level via [.bahzing_level_block()] and [.bahzing_narrowest_level_block()].
 #'
 #' @param level Character. The level's variable-name prefix, e.g. `"genus"`.
 #'   Used for the g-estimation nodes (`<level>.psi`, `<level>.eta.*`), which
@@ -133,7 +162,7 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' @param tau_prefix Character. Prefix used for the precision nodes
 #'   (`<tau_prefix>tau`/`<tau_prefix>sigma`). Defaults to `paste0(level,".")`
 #'   (e.g. genus's precision nodes are `genus.tau`/`genus.sigma`) - overridden
-#'   to `""` by [.bahzing_species_block()], since the narrowest/species-role
+#'   to `""` by [.bahzing_narrowest_level_block()], since the narrowest
 #'   level's precision nodes are unprefixed (`tau`/`sigma`) in BaHZING's
 #'   original model, unlike every other level.
 #' @return A length-1 character string ending in a trailing newline.
@@ -168,8 +197,8 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' terminal level, phylum by default), there's nothing to borrow from, so the
 #' prior falls back to a fixed `dnorm(0, tau)` instead.
 #'
-#' Shared by every level including the narrowest/species-role level, via
-#' [.bahzing_level_block()] and [.bahzing_species_block()] respectively - see
+#' Shared by every level including the narrowest level, via
+#' [.bahzing_level_block()] and [.bahzing_narrowest_level_block()] respectively - see
 #' `mu_owner` below for why that level needs one extra parameter to reuse
 #' this.
 #'
@@ -189,10 +218,10 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' @param mu_owner Character. Whose name labels the intermediate "borrowed
 #'   mean" node (`mu.<mu_owner>`). Defaults to `parent`, matching the
 #'   original model's convention for mid-hierarchy levels (e.g. genus's node
-#'   is `mu.family`, named after *its* parent). The narrowest/species-role
-#'   level is the one exception in the original model - its node is
-#'   `mu.species` (named after *itself*, not `mu.genus`) - so
-#'   [.bahzing_species_block()] overrides this explicitly to its own level
+#'   is `mu.family`, named after *its* parent). The narrowest level is the
+#'   one exception in the original model - its node is `mu.species` (named
+#'   after *itself*, not `mu.genus`) - so
+#'   [.bahzing_narrowest_level_block()] overrides this explicitly to its own level
 #'   name. This is a naming inconsistency inherited from the original model,
 #'   preserved rather than "fixed", since `mu.*` is never a monitored/
 #'   extracted node - only its label differs, not the value.
@@ -235,46 +264,44 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' comment header, the exposure-effect prior
 #' ([.bahzing_exposure_prior_block()]), and the precision-prior/g-estimation
 #' lines ([.bahzing_precision_gestimation_block()]). Handles both mid-
-#' hierarchy levels (`parent` supplied - borrows its prior mean from the
-#' parent level) and the broadest/terminal level (`parent = NULL` - the top
-#' of the hierarchy, with nothing to borrow from).
+#' hierarchy levels (`i > 1` - borrows its prior mean from the parent level
+#' at `i - 1`) and the broadest/terminal level (`i == 1` - the top of the
+#' hierarchy, with nothing to borrow from).
 #'
-#' Not used for the narrowest/species-role level - that level has its own
+#' This level's and its parent's JAGS identifiers (variable-name prefix,
+#' loop index, taxon-count scalar, incidence-matrix name) are derived
+#' automatically from `taxa_levels` and `i` via [.bahzing_level_vars()] -
+#' callers only need to supply the hierarchy and a position.
+#'
+#' Not used for the narrowest level - that level has its own
 #' likelihood/dispersion/intercept/covariate structure with no equivalent at
 #' any other level, so it gets its own function,
-#' [.bahzing_species_block()], which reuses the same two shared sub-block
-#' generators this function uses.
+#' [.bahzing_narrowest_level_block()], which reuses the same two shared
+#' sub-block generators this function uses.
 #'
-#' @param level Character. This level's variable-name prefix, e.g. `"genus"`.
-#' @param level_label Character. Human-readable label for this level's
-#'   comment header, e.g. `"Genus"` (produces `# Genus level`).
-#' @param idx Character. This level's JAGS loop index variable, e.g. `"g.r"`.
-#' @param level_R Character. The JAGS scalar holding this level's taxon
-#'   count, e.g. `"Genus.R"` - bounds the `for(idx in 1:level_R)` loop.
-#' @param parent Character or `NULL`. The parent level's variable-name prefix
-#'   (e.g. `"family"` for genus). `NULL` only for the broadest/terminal level.
-#' @param parent_R Character or `NULL`. The parent level's taxon-count
-#'   scalar (e.g. `"Family.R"`). Required whenever `parent` is supplied.
-#' @param parent_data Character or `NULL`. The taxonomy indicator matrix
-#'   linking this level to the parent (e.g. `"FamilyData"`). Required
-#'   whenever `parent` is supplied.
+#' @param taxa_levels Character vector naming the taxonomic hierarchy,
+#'   ordered broadest to narrowest.
+#' @param i Integer position of this level in `taxa_levels`.
 #' @return A length-1 character string: this level's complete JAGS block.
 #' @keywords internal
 #' @noRd
-.bahzing_level_block <- function(level, level_label, idx, level_R,
-                                  parent = NULL, parent_R = NULL, parent_data = NULL) {
-  exposure_prior  <- .bahzing_exposure_prior_block(level, idx, parent, parent_R, parent_data)
-  precision_gestim <- .bahzing_precision_gestimation_block(level, idx)
+.bahzing_level_block <- function(taxa_levels, i) {
+  cur    <- .bahzing_level_vars(taxa_levels, i)
+  parent <- if (i > 1) .bahzing_level_vars(taxa_levels, i - 1) else NULL
+
+  exposure_prior   <- .bahzing_exposure_prior_block(cur$level, cur$idx,
+                        parent$level, parent$R, parent$data)
+  precision_gestim <- .bahzing_precision_gestimation_block(cur$level, cur$idx)
 
   glue::glue(
-"    # <<level_label>> level
-    for(<<idx>> in 1:<<level_R>>) {
+"    # <<cur$label>> level
+    for(<<cur$idx>> in 1:<<cur$R>>) {
 <<exposure_prior>><<precision_gestim>>    }
 
 ", .open = "<<", .close = ">>", .trim = FALSE)
 }
 
-#' Build the narrowest/species-role level's JAGS block - the data-likelihood level
+#' Build the narrowest level's JAGS block - the data-likelihood level
 #'
 #' The narrowest level in `taxa_levels` is tied directly to the observed
 #' data, so unlike [.bahzing_level_block()] (mid-hierarchy/terminal levels,
@@ -286,6 +313,11 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' original model's separate with/without-covariates literal text into one
 #' function.
 #'
+#' As with [.bahzing_level_block()], this level's and its parent's JAGS
+#' identifiers are derived automatically from `taxa_levels` and `i` via
+#' [.bahzing_level_vars()] - the parent is always `i - 1` (`n >= 2` is
+#' enforced by `validate_taxa_levels()`, so a parent always exists here).
+#'
 #' Reuses the same two shared sub-block generators every other level uses:
 #' [.bahzing_exposure_prior_block()] (with `mu_owner = level` and a
 #' `"prior on exposure effects"` comment, matching the original model's
@@ -294,6 +326,10 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #' this level's precision nodes are unprefixed in the original model, unlike
 #' every other level - see that function's docs).
 #'
+#' @param taxa_levels Character vector naming the taxonomic hierarchy,
+#'   ordered broadest to narrowest.
+#' @param i Integer position of the narrowest level in `taxa_levels` (i.e.
+#'   `length(taxa_levels)`).
 #' @param has_covar Logical. Whether covariates are included in the model.
 #'   When `TRUE`, adds the `delta`/`delta.zero` covariate terms to the
 #'   likelihood and their `dnorm(0, 1.0E-02)` priors; when `FALSE`, omits
@@ -301,20 +337,15 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #'   variants). Confirmed by diffing the two original literal model strings:
 #'   covariate terms only ever appear in this block - every other level's
 #'   text is identical between the with/without-covariates variants.
-#' @param level Character. This level's variable-name prefix (`"species"` by
-#'   default).
-#' @param parent Character. The parent level's variable-name prefix to
-#'   borrow the prior mean from (`"genus"` by default).
-#' @param parent_R Character. The parent level's taxon-count scalar
-#'   (`"Genus.R"` by default).
-#' @param parent_data Character. The taxonomy indicator matrix linking this
-#'   level to the parent (`"GenusData"` by default).
 #' @return A length-1 character string: the complete data-likelihood-level
 #'   JAGS block.
 #' @keywords internal
 #' @noRd
-.bahzing_species_block <- function(has_covar, level = "species", parent = "genus",
-                                    parent_R = "Genus.R", parent_data = "GenusData") {
+.bahzing_narrowest_level_block <- function(taxa_levels, i, has_covar) {
+  cur    <- .bahzing_level_vars(taxa_levels, i)
+  parent <- .bahzing_level_vars(taxa_levels, i - 1)
+  level  <- cur$level
+
   covar_lambda <- if (has_covar) " + inprod(delta[r, 1:Q], W[i,1:Q])" else ""
   covar_pi     <- if (has_covar) " + inprod(delta.zero[r, 1:Q], W[i,1:Q])" else ""
   covar_prior  <- if (has_covar)
@@ -326,8 +357,8 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
       }
 " else ""
 
-  exposure_prior <- .bahzing_exposure_prior_block(level, "r", parent = parent,
-                                                    parent_R = parent_R, parent_data = parent_data,
+  exposure_prior <- .bahzing_exposure_prior_block(level, "r", parent = parent$level,
+                                                    parent_R = parent$R, parent_data = parent$data,
                                                     mu_owner = level, tau_prefix = "",
                                                     comment = "prior on exposure effects")
   precision_gestim <- .bahzing_precision_gestimation_block(level, "r", tau_prefix = "")
@@ -360,19 +391,19 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
 #'
 #' The top-level entry point for the templating system: builds every
 #' taxonomic level's block (the narrowest level via
-#' [.bahzing_species_block()]; every other level via
-#' [.bahzing_level_block()], each passed its own parent level's info, with
-#' the broadest level in `taxa_levels` passed `parent = NULL`) and
-#' concatenates them narrowest-to-broadest into one complete `model { ... }`
-#' string, matching the original hand-written text's declaration order,
-#' ready to pass to `jags.model(file = textConnection(...))`.
+#' [.bahzing_narrowest_level_block()]; every other level via
+#' [.bahzing_level_block()], each simply passed `taxa_levels` and its own
+#' position - parent resolution happens automatically inside those
+#' functions) and concatenates them narrowest-to-broadest into one complete
+#' `model { ... }` string, matching the original hand-written text's
+#' declaration order, ready to pass to `jags.model(file = textConnection(...))`.
 #'
 #' @param taxa_levels Character vector naming the taxonomic hierarchy,
 #'   ordered broadest to narrowest (e.g. `default_taxa_levels`). Must have
 #'   already been validated with `validate_taxa_levels()`.
 #' @param has_covar Logical. Whether the model includes covariates - passed
-#'   straight through to [.bahzing_species_block()], the only level that
-#'   varies its text based on this (see that function for why).
+#'   straight through to [.bahzing_narrowest_level_block()], the only level
+#'   that varies its text based on this (see that function for why).
 #' @return A length-1 character string: the complete JAGS model text, from
 #'   `model {` through the final closing `}`.
 #' @keywords internal
@@ -381,20 +412,12 @@ globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
   n <- length(taxa_levels)
   blocks <- vector("list", n)
   for (i in seq_len(n)) {
-    level <- tolower(taxa_level_name(taxa_levels, i))
-    parent <- if (i > 1) taxa_level_name(taxa_levels, i - 1) else NULL
-    if (i == n) {
-      # Narrowest level: the data-likelihood ("species") role. Always has a
-      # parent (n >= 2 is enforced by validate_taxa_levels()).
-      blocks[[i]] <- .bahzing_species_block(has_covar, level,
-                       tolower(parent), paste0(parent, ".R"), paste0(parent, "Data"))
+    blocks[[i]] <- if (i == n) {
+      # Narrowest level: the data-likelihood role. Always has a parent
+      # (n >= 2 is enforced by validate_taxa_levels()).
+      .bahzing_narrowest_level_block(taxa_levels, i, has_covar)
     } else {
-      idx <- paste0(substr(level, 1, 1), ".r")
-      level_label <- taxa_level_name(taxa_levels, i)
-      blocks[[i]] <- .bahzing_level_block(level, level_label, idx, paste0(level_label, ".R"),
-                       if (!is.null(parent)) tolower(parent) else NULL,
-                       if (!is.null(parent)) paste0(parent, ".R") else NULL,
-                       if (!is.null(parent)) paste0(parent, "Data") else NULL)
+      .bahzing_level_block(taxa_levels, i)
     }
   }
   # Emit narrowest -> broadest (reverse of taxa_levels' broadest-first
