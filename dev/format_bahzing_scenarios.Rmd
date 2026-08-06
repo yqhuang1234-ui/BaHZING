@@ -1,0 +1,449 @@
+---
+title: "Format_BaHZING(): Comprehensive Input Scenario Testing"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+```{css, echo = FALSE}
+/* Long taxon-lineage column headers wrap onto multiple lines instead of
+   overflowing or forcing the table to scroll unreasonably wide. */
+table.dataTable thead th {
+  white-space: normal !important;
+  word-break: break-word;
+  max-width: 160px;
+}
+```
+
+```{r libs, message = FALSE}
+pkgload::load_all(".", quiet = TRUE)
+library(phyloseq)
+library(DT)
+```
+
+## Overview
+
+This is a developer/QA verification document, not end-user tutorial
+documentation - it exists to show the *actual, executed* output of
+`Format_BaHZING()` across every edge case identified while building and
+reviewing the `taxa_levels` generalization refactor, including a few
+deliberately-triggered error conditions. It complements (doesn't replace)
+the pass/fail assertions in `tests/testthat/test-Format_BaHZING.R` - the
+value here is visible, inspectable evidence a human can review directly,
+rather than just a green checkmark.
+
+`Format_BaHZING()` alone involves no JAGS/MCMC, so every scenario below is
+fast - this whole document builds in well under a few seconds.
+
+```{r data}
+data("iHMP_Reduced")
+```
+
+A small helper used throughout for the expected-error scenarios, so each
+one shows the actual error text without halting the knit:
+
+```{r error-helper}
+show_error <- function(expr) {
+  result <- tryCatch(expr, error = function(e) e)
+  if (inherits(result, "error")) {
+    cat("ERROR:", conditionMessage(result), "\n")
+  } else {
+    cat("No error - unexpected for this scenario.\n")
+  }
+  invisible(result)
+}
+```
+
+Two more helpers for previewing actual data content, both using
+`DT::datatable()` for a real interactive HTML table (sortable, scrollable)
+rather than a static markdown-converted one - long taxon-lineage column
+headers wrap across multiple lines via the CSS rule above instead of
+overflowing or being abbreviated away.
+
+`preview_table()` shows a handful of metadata columns plus a handful of
+taxon-count columns from `Table`, side by side, with their **full** column
+names:
+
+```{r preview-table-helper}
+preview_table <- function(formatted_data, meta_cols = c("consent_age", "sex", "soft_drinks_dietnum"),
+                          n_taxa = 3, n_rows = 5) {
+  tbl <- data.frame(formatted_data$Table)
+  taxa_cols <- head(formatted_data$taxon_columns, n_taxa)
+  preview <- tbl[seq_len(n_rows), c(meta_cols, taxa_cols)]
+  datatable(preview, options = list(scrollX = TRUE, dom = "t"), class = "cell-border stripe")
+}
+```
+
+`preview_matrix()` shows a corner of one of the binary hierarchy incidence
+matrices (e.g. `Species.Genus.Matrix`) - rows are the broader level,
+columns the narrower level, `1` meaning "this narrower taxon belongs to
+this broader taxon" (as established earlier: row/column meaning is fixed
+by `hierarchy_matrix_name()`'s own convention, not guessed here):
+
+```{r preview-matrix-helper}
+preview_matrix <- function(formatted_data, matrix_name, n_rows = 5, n_cols = 5) {
+  m <- formatted_data[[matrix_name]]
+  preview <- as.data.frame(m[seq_len(min(n_rows, nrow(m))), seq_len(min(n_cols, ncol(m))), drop = FALSE])
+  datatable(preview, options = list(scrollX = TRUE, dom = "t"), class = "cell-border stripe")
+}
+```
+
+# Hierarchy generalization
+
+## 1. Default 6-level hierarchy (baseline)
+
+No `taxa_levels` argument - falls back to `default_taxa_levels`.
+
+```{r scenario-1}
+formatted_default <- Format_BaHZING(iHMP_Reduced)
+formatted_default$taxa_levels
+names(formatted_default)
+length(formatted_default$taxon_columns)
+```
+
+```{r scenario-1-preview}
+preview_table(formatted_default)
+```
+
+Each of the 5 binary hierarchy incidence matrices for the default
+hierarchy (rows = broader level, columns = narrower level, `1` = "this
+narrower taxon belongs to this broader taxon"):
+
+```{r scenario-1-matrices, results = 'asis'}
+matrix_names <- grep("\\.Matrix$", names(formatted_default), value = TRUE)
+for (mn in matrix_names) {
+  cat("**", mn, "** (", nrow(formatted_default[[mn]]), " x ",
+      ncol(formatted_default[[mn]]), ")\n\n", sep = "")
+  print(htmltools::tagList(preview_matrix(formatted_default, mn)))
+}
+```
+
+## 2. Reduced-depth custom hierarchy
+
+Skips `Class` and `Order` entirely.
+
+```{r scenario-2}
+reduced_levels <- c("Phylum", "Family", "Genus", "Species")
+formatted_reduced <- Format_BaHZING(iHMP_Reduced, taxa_levels = reduced_levels)
+formatted_reduced$taxa_levels
+names(formatted_reduced)
+# Confirm no Class/Order matrices leaked through
+any(grepl("Class|Order", names(formatted_reduced)))
+```
+
+```{r scenario-2-preview}
+preview_table(formatted_reduced)
+```
+
+`Family.Phylum.Matrix` - the matrix directly linking `Family` to `Phylum`,
+skipping `Class`/`Order` entirely, which is the whole point of this
+reduced-depth scenario (contrast with the default hierarchy's separate
+`Class.Phylum.Matrix` -> `Order.Class.Matrix` -> `Family.Order.Matrix`
+chain):
+
+```{r scenario-2-matrix}
+preview_matrix(formatted_reduced, "Family.Phylum.Matrix")
+```
+
+## 3. Fully custom-named hierarchy
+
+Renames `tax_table` columns to generic, non-taxonomic labels before running
+the full 6-level hierarchy under those names - proves no level name is
+hardcoded anywhere, and confirms the prefix-stripping fix (no more stacked
+prefixes like `"a__p__..."`). The kingdom-rank column is kept named
+`"Domain"` here deliberately (not renamed to `"Kingdom"`) so this scenario
+isolates the `taxa_levels`-driven fix alone - see Scenario 11 for the
+separate `Kingdom`-named branch case (originally a gap, since fixed).
+
+```{r scenario-3}
+ps_renamed <- iHMP_Reduced
+tt <- tax_table(ps_renamed)
+colnames(tt) <- c("Domain", "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+tax_table(ps_renamed) <- tt
+
+custom_levels <- c("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+formatted_custom <- Format_BaHZING(ps_renamed, taxa_levels = custom_levels)
+formatted_custom$taxa_levels
+names(formatted_custom)
+# A clean single prefix per segment throughout, no stacking anywhere:
+formatted_custom$taxon_columns[1]
+```
+
+```{r scenario-3-preview}
+preview_table(formatted_custom)
+```
+
+The hierarchy matrices exist here too - just named after the custom levels
+(`"Bravo.Alpha.Matrix"` etc.) instead of `"Class.Phylum.Matrix"`, since
+`hierarchy_matrix_name()` derives the name from whatever `taxa_levels` was
+actually given, not a fixed set of biological rank names:
+
+```{r scenario-3-matrix}
+preview_matrix(formatted_custom, "Bravo.Alpha.Matrix")
+```
+
+## 4. First-letter collision (expected error)
+
+Two custom levels sharing a first letter - `validate_taxa_levels()` rejects
+this rather than silently merging them.
+
+```{r scenario-4}
+show_error(Format_BaHZING(iHMP_Reduced, taxa_levels = c("Class", "Clade")))
+```
+
+## 4b. Invalid R identifier in `taxa_levels`
+
+Level names get pasted directly into generated JAGS variable names and
+`data.frame` column names, so they must be valid R identifiers.
+`"16S"` (as in 16S rRNA sequencing - a name a microbiome researcher might
+plausibly reach for) starts with a digit, which `make.names()` would
+silently rewrite to `"X16S"` - `validate_taxa_levels()` rejects it outright
+instead of letting that silent rewrite happen.
+
+```{r scenario-4b}
+make.names("16S")
+show_error(Format_BaHZING(iHMP_Reduced, taxa_levels = c("16S", "Species")))
+```
+
+## 5. Fewer than 2 taxonomic levels
+
+Two genuinely different failure modes that produce similar-sounding but
+distinct errors: one checks what you *asked for* (`taxa_levels`), the other
+checks what the *data itself* provides, independent of `taxa_levels`.
+
+### 5a. Fewer than 2 elements in the `taxa_levels` argument
+
+```{r scenario-5a}
+show_error(Format_BaHZING(iHMP_Reduced, taxa_levels = c("Species")))
+```
+
+### 5b. Fewer than 2 columns in the raw input `tax_table`
+
+`taxa_levels` here is left at its normal 6-level default - the input data
+itself is what's deficient (only 1 rank column kept, though all 222 taxa/
+rows remain intact).
+
+```{r scenario-5b}
+PS_one_rank <- iHMP_Reduced
+tax_table(PS_one_rank) <- tax_table(tax_table(PS_one_rank)[, 1])
+show_error(Format_BaHZING(PS_one_rank))
+```
+
+# Data-quality auto-repair
+
+## 6. Narrowest level (Species) column entirely absent
+
+```{r scenario-6}
+PS_no_species <- iHMP_Reduced
+tax_table(PS_no_species) <- tax_table(PS_no_species)[, colnames(tax_table(PS_no_species)) != "Species"]
+
+formatted_no_species <- Format_BaHZING(PS_no_species)
+# Auto-created placeholder names:
+head(grep("s__unclassified", formatted_no_species$taxon_columns, value = TRUE), 3)
+```
+
+## 7. Mid-hierarchy `NA` values
+
+Three taxa have their `Genus` classification set to `NA` (imagine: sequences
+that couldn't be resolved to genus level). These get auto-filled with
+`"g__unclassifiedN"` placeholders rather than propagating `NA` into a
+downstream column name.
+
+```{r scenario-7}
+PS_na_genus <- iHMP_Reduced
+tt_na <- tax_table(PS_na_genus)
+tt_na[1:3, "Genus"] <- NA
+tax_table(PS_na_genus) <- tt_na
+
+formatted_na_genus <- Format_BaHZING(PS_na_genus)
+any(is.na(formatted_na_genus$taxon_columns))
+grep("g__unclassified", formatted_na_genus$taxon_columns, value = TRUE)
+```
+
+## 8. Duplicate names at the narrowest level
+
+Forces two different taxa to share the exact same `Species` classification
+(a real occurrence with limited sequencing resolution) - both stay distinct
+via a `_N` disambiguating suffix, rather than silently collapsing into one
+column.
+
+```{r scenario-8}
+PS_dup_species <- iHMP_Reduced
+tt_dup <- tax_table(PS_dup_species)
+tt_dup[2, "Species"] <- tt_dup[1, "Species"]
+tax_table(PS_dup_species) <- tt_dup
+
+formatted_dup <- Format_BaHZING(PS_dup_species)
+# Still 222 distinct columns, no silent collapsing:
+length(unique(formatted_dup$taxon_columns)) == length(formatted_dup$taxon_columns)
+any(grepl("_[0-9]+$", formatted_dup$taxon_columns))
+
+# The actual before/after: row 1 (the original, first occurrence) keeps its
+# plain name; row 2 (the forced duplicate) gets the disambiguating "_1" suffix.
+cat("Row 1 (original):\n  ", formatted_dup$taxon_columns[1], "\n")
+cat("Row 2 (forced duplicate, disambiguated):\n  ", formatted_dup$taxon_columns[2], "\n")
+```
+
+One more subtlety visible above, worth being precise about: row 2's
+disambiguated name is `"...JAGTTR01sp018223385_1"` (no separator between
+`JAGTTR01` and `sp018223385`), while row 1's is `"...JAGTTR01.sp018223385"`
+(dot-separated). That's because the duplicate-renaming code
+(`str_replace_all(duplicate.names, " ", "")`) strips *all* spaces from the
+name it's disambiguating - including the species name's own original
+internal space - not just the spaces the renaming step itself introduced.
+Non-duplicated names get their internal space turned into a dot later, via
+`make.names()`; a duplicated name's internal space is already gone by that
+point, so it's simply absent rather than replaced. Still fully unique,
+still correct - just a minor cosmetic inconsistency between duplicated and
+non-duplicated names, not a correctness issue.
+
+## 9. Kingdom-level `NA` for some taxa (expected error)
+
+Unlike the mid-hierarchy case above, a missing *Kingdom*-level
+classification is treated as a hard data-quality error rather than
+auto-repaired - the broadest rank is expected to always be resolvable.
+
+```{r scenario-9}
+PS_na_kingdom <- iHMP_Reduced
+tt_king <- tax_table(PS_na_kingdom)
+tt_king[1, "Domain"] <- NA
+tax_table(PS_na_kingdom) <- tt_king
+
+show_error(Format_BaHZING(PS_na_kingdom))
+```
+
+# Kingdom/Domain handling
+
+## 10. `Domain` column present
+
+This is `iHMP_Reduced`'s actual raw shape - Scenario 1 above already
+exercises this path (the SILVA/QIIME2-style `d__` -> `k__` conversion),
+included here again for completeness alongside its siblings.
+
+```{r scenario-10}
+"Domain" %in% colnames(tax_table(iHMP_Reduced))
+# Confirmed already in scenario 1: taxon_columns start with "k__", not "d__"
+grepl("^k__", formatted_default$taxon_columns[1])
+```
+
+## 11. A literal `"Kingdom"` column instead of `"Domain"`
+
+Real data (like `iHMP_Reduced`) only ever has `Domain`, so this branch
+(`if ("Kingdom" %in% colnames(...))`) is otherwise never actually exercised.
+**This originally uncovered a real gap**, since fixed: unlike the
+`Domain`-specific branch (which explicitly converts `"d__"` -> `"k__"`),
+the `Kingdom`-named branch used to only check for an existing `"k__"`
+prefix - if the raw values were still SILVA/QIIME2-style (`"d__Bacteria"`),
+it prepended `"k__"` without stripping the old prefix, producing a stacked
+`"k__d__Bacteria"` instead of clean `"k__Bacteria"`. The same
+strip-existing-prefix-first fix already applied to the general
+`taxa_levels` loop earlier this session has now been applied here too - see
+`tests/testthat/test-Format_BaHZING.R`'s regression test for this exact
+scenario.
+
+```{r scenario-11}
+PS_literal_kingdom <- iHMP_Reduced
+tt_king2 <- tax_table(PS_literal_kingdom)
+colnames(tt_king2)[colnames(tt_king2) == "Domain"] <- "Kingdom"
+tax_table(PS_literal_kingdom) <- tt_king2
+
+formatted_literal_kingdom <- Format_BaHZING(PS_literal_kingdom)
+formatted_literal_kingdom$taxon_columns[1]
+# Compare to the clean version from scenario 1:
+formatted_default$taxon_columns[1]
+```
+
+## 12. Kingdom and Domain both absent entirely
+
+This session's fix: `BaHZING_Model()` used to break silently here (detected
+outcome columns via a hardcoded `"k__"` search); `Format_BaHZING()` itself
+was already safe.
+
+```{r scenario-12}
+PS_no_kingdom <- iHMP_Reduced
+tax_table(PS_no_kingdom) <- tax_table(PS_no_kingdom)[, colnames(tax_table(PS_no_kingdom)) != "Domain"]
+
+formatted_no_kingdom <- Format_BaHZING(PS_no_kingdom)
+length(formatted_no_kingdom$taxon_columns)
+any(grepl("k__", formatted_no_kingdom$taxon_columns))
+formatted_no_kingdom$taxon_columns[1]
+```
+
+# Structural edge cases
+
+## 13. `taxa_are_rows = TRUE` input orientation
+
+`iHMP_Reduced` natively has `taxa_are_rows() == FALSE` (samples as rows).
+This confirms the very first check in `Format_BaHZING()` (transpose to a
+consistent orientation before doing anything else) actually works -
+previously unexercised by any test this session.
+
+```{r scenario-13}
+taxa_are_rows(iHMP_Reduced)
+PS_transposed <- t(iHMP_Reduced)
+taxa_are_rows(PS_transposed)
+
+formatted_transposed <- Format_BaHZING(PS_transposed)
+identical(formatted_default$Table, formatted_transposed$Table)
+identical(formatted_default$Species.Genus.Matrix, formatted_transposed$Species.Genus.Matrix)
+identical(formatted_default$taxon_columns, formatted_transposed$taxon_columns)
+```
+
+## 14. Already-prefixed vs. unprefixed raw taxonomy values
+
+`iHMP_Reduced`'s raw values already carry `p__`/`c__`/etc. (scenario 1
+already demonstrates this, implicitly). Here, those prefixes are stripped
+out entirely before running `Format_BaHZING()`, confirming both converge to
+the identical, correctly-prefixed result either way.
+
+```{r scenario-14}
+PS_stripped <- iHMP_Reduced
+tt_strip <- tax_table(PS_stripped)
+for (col in colnames(tt_strip)) {
+  tt_strip[, col] <- sub("^[a-zA-Z]__", "", tt_strip[, col])
+}
+tax_table(PS_stripped) <- tt_strip
+# Raw values no longer carry any prefix:
+as.character(tax_table(PS_stripped)[1, "Genus"])
+
+formatted_stripped <- Format_BaHZING(PS_stripped)
+identical(formatted_stripped$taxon_columns, formatted_default$taxon_columns)
+```
+
+# Output contract check
+
+## 15. `taxon_columns` matches `Table`'s actual column names
+
+The consistency this session's `make.names()` fix established - confirmed
+across a few of the scenarios above, not just the default case.
+
+```{r scenario-15}
+check_consistency <- function(formatted_data, label) {
+  ok <- all(formatted_data$taxon_columns %in% colnames(data.frame(formatted_data$Table)))
+  cat(label, ": ", ok, "\n", sep = "")
+}
+
+check_consistency(formatted_default, "Default (scenario 1)")
+check_consistency(formatted_reduced, "Reduced depth (scenario 2)")
+check_consistency(formatted_custom, "Custom names (scenario 3)")
+check_consistency(formatted_no_species, "Species absent (scenario 6)")
+check_consistency(formatted_no_kingdom, "Kingdom/Domain absent (scenario 12)")
+check_consistency(formatted_transposed, "Transposed input (scenario 13)")
+```
+
+# Summary
+
+All scenarios above ran to completion with the expected result - either
+successful, correctly-repaired output, or a clear error for genuinely
+invalid input. Scenario 11 (a literal `"Kingdom"` column carrying
+un-converted `"d__"`-style values) originally exposed a real gap - a
+stacked prefix instead of a clean one, since real data only ever exercises
+the `Domain`-named branch, not this one - which has since been fixed in
+`Format_BaHZING()` and is now covered by a dedicated regression test.
