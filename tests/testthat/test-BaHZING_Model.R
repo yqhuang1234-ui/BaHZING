@@ -129,3 +129,99 @@ test_that("test BaHZING_Model", {
     "counterfactual_profiles must be numeric.")
 
 })
+
+test_that("BaHZING_Model runs end-to-end with a custom, differently-sized taxa_levels", {
+  data("iHMP_Reduced")
+
+  # 4-level hierarchy (skips Class/Order), real column names from iHMP_Reduced
+  custom_levels <- c("Phylum", "Family", "Genus", "Species")
+  formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = custom_levels)
+
+  x <- c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")
+
+  results <- BaHZING_Model(formatted_data = formatted_data,
+                           x = x,
+                           covar = NULL,
+                           exposure_standardization = "standard_normal",
+                           n.chains = 1,
+                           n.adapt = 60,
+                           n.iter.burnin = 2,
+                           n.iter.sample = 2,
+                           counterfactual_profiles = c(-0.5, 0.5))
+
+  testthat::expect_equal(ncol(results), 11)
+
+  # domain should only ever contain this custom hierarchy's own level names -
+  # no leftover "Class"/"Order" from the default 6-level scheme, and no NA
+  # from a mis-resolved row.
+  testthat::expect_true(all(unique(results$domain) %in% custom_levels))
+  testthat::expect_false(any(c("Class", "Order") %in% unique(results$domain)))
+  testthat::expect_false(anyNA(results$domain))
+
+  # Every level in the custom hierarchy should actually show up in the
+  # output - i.e. the resolver isn't silently collapsing levels together.
+  testthat::expect_true(all(custom_levels %in% unique(results$domain)))
+})
+
+test_that("taxon_columns matches the legacy k__-grep column set on a normal dataset", {
+  # Compatibility/regression check: for a standard dataset (Kingdom/Domain
+  # present), formatted_data$taxon_columns should select the exact same set
+  # of columns the old grep("k__", ...) approach did - confirming this
+  # change doesn't alter behavior for the common case, only fixes the
+  # Kingdom-absent one.
+  data("iHMP_Reduced")
+  formatted_data <- Format_BaHZING(iHMP_Reduced)
+  exposure_covar_dat <- data.frame(formatted_data$Table)
+
+  legacy_cols <- names(exposure_covar_dat)[grep("k__", names(exposure_covar_dat))]
+  new_cols <- formatted_data$taxon_columns
+
+  testthat::expect_true(length(new_cols) > 0)
+  testthat::expect_equal(sort(new_cols), sort(legacy_cols))
+})
+
+test_that("BaHZING_Model runs end-to-end when Kingdom/Domain is entirely absent from the input", {
+  data("iHMP_Reduced")
+
+  PS <- iHMP_Reduced
+  tt <- tax_table(PS)
+  tt_no_kingdom <- tt[, colnames(tt) != "Domain"]
+  tax_table(PS) <- tt_no_kingdom
+  testthat::expect_false(any(c("Kingdom", "Domain") %in% colnames(tax_table(PS))))
+
+  formatted_data <- Format_BaHZING(PS)
+  # No Kingdom/Domain rank, so no "k__" prefix should appear anywhere in the
+  # recorded taxon columns - this is the scenario that used to silently
+  # break BaHZING_Model()'s old grep("k__", ...) column detection.
+  testthat::expect_equal(length(formatted_data$taxon_columns), 222)
+  testthat::expect_false(any(grepl("k__", formatted_data$taxon_columns)))
+
+  x <- c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")
+  results <- BaHZING_Model(formatted_data = formatted_data,
+                           x = x,
+                           covar = NULL,
+                           exposure_standardization = "standard_normal",
+                           n.chains = 1,
+                           n.adapt = 60,
+                           n.iter.burnin = 2,
+                           n.iter.sample = 2,
+                           counterfactual_profiles = c(-0.5, 0.5),
+                           verbose = FALSE)
+
+  testthat::expect_equal(ncol(results), 11)
+  # All 222 species should be represented in the output, confirming Y wasn't
+  # silently reduced to 0 columns.
+  testthat::expect_equal(length(unique(results$taxa_full[results$domain == "Species"])), 222)
+})
+
+test_that("BaHZING_Model errors clearly when formatted_data has no taxon_columns", {
+  data("iHMP_Reduced")
+  formatted_data <- Format_BaHZING(iHMP_Reduced)
+  formatted_data$taxon_columns <- NULL
+
+  testthat::expect_error(
+    BaHZING_Model(formatted_data = formatted_data,
+                  x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")),
+    "no \\$taxon_columns"
+  )
+})

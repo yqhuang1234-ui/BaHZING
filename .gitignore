@@ -2,3 +2,13 @@
 .Rhistory
 .RData
 .Ruserdata
+doc/
+vignettes/*.html
+vignettes/*.R
+inst/doc
+dev/*.html
+dev/*.knit.md
+*.Rcheck/
+*.tar.gz
+.DS_Store
+.claude/

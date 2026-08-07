@@ -1,0 +1,26 @@
+variant: parallel_post_refactor
+parallel: yes
+seed: 20260728
+git_sha: 3d0b2ac
+x:
+- soft_drinks_dietnum
+- diet_soft_drinks_dietnum
+covar: consent_age
+n.chains: 3.0
+n.adapt: 100.0
+n.iter.burnin: 1000.0
+n.iter.sample: 5000.0
+exposure_standardization: ~
+counterfactual_profiles: ~
+q: ~
+return_all_estimates: no
+ROPE_range:
+- -0.1
+- 0.1
+n.cores: 3.0
+verbose: no
+note: x and covar match tests/testthat/test-BaHZING_Model.R. n.chains explicitly set
+  to 3 (same as function default) so parallel actually runs chains concurrently. Every
+  other value above is BaHZING_Model's own current default, read via formals() at
+  the time this run happened (not hardcoded here), so it stays accurate even if a
+  later commit changes what the default is.

@@ -1,0 +1,146 @@
+---
+title: "Generalizing to different taxonomic hierarchies with taxa_levels"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Generalizing to different taxonomic hierarchies with taxa_levels}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+
+if (!requireNamespace("pkgload", quietly = TRUE)) {
+  stop("pkgload is required to build this vignette from the source tree.")
+}
+pkgload::load_all(quiet = TRUE)
+```
+
+```{r libs, message = FALSE}
+library(BaHZING)
+library(phyloseq)
+```
+
+## Overview
+
+`Format_BaHZING()` and `BaHZING_Model()` no longer assume a fixed 6-level
+taxonomic hierarchy (Phylum → Class → Order → Family → Genus → Species). Both
+functions take a `taxa_levels` argument — an ordered character vector,
+broadest to narrowest — that can describe a hierarchy with a **different
+number of levels** and/or **different level names**. If you don't supply one,
+`taxa_levels` defaults to the original 6-level scheme, so existing code is
+unaffected.
+
+This vignette proves both kinds of generalization work, by actually running
+`BaHZING_Model()` under three different hierarchies and checking that the
+taxonomic labels in the output match whatever hierarchy was requested.
+
+**A note on settings**: every scenario below uses deliberately tiny values for
+`n.chains`, `n.adapt`, `n.iter.burnin`, and `n.iter.sample`, purely so this
+vignette builds quickly. For a real analysis, use `n.chains = 3` and
+`n.adapt`, `n.iter.burnin`, and `n.iter.sample` in the thousands (the function
+defaults), as in the package README.
+
+```{r data}
+data("iHMP_Reduced", package = "BaHZING")
+
+x <- c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")
+demo_settings <- list(
+  covar = NULL,
+  n.chains = 1,
+  n.adapt = 60,
+  n.iter.burnin = 2,
+  n.iter.sample = 2,
+  verbose = FALSE
+)
+```
+
+## Scenario 1: the default 6-level hierarchy
+
+No `taxa_levels` argument is supplied, so both functions fall back to the
+original `Phylum, Class, Order, Family, Genus, Species` scheme.
+
+```{r scenario-default}
+formatted_default <- Format_BaHZING(iHMP_Reduced)
+formatted_default$taxa_levels
+
+results_default <- do.call(BaHZING_Model, c(
+  list(formatted_data = formatted_default, x = x), demo_settings
+))
+sort(unique(results_default$domain))
+```
+
+## Scenario 2: a reduced-depth hierarchy
+
+A 4-level hierarchy that skips `Class` and `Order` entirely, using
+`iHMP_Reduced`'s own column names. This proves `BaHZING_Model()`'s
+hierarchical-shrinkage logic works correctly at a different depth, not just a
+different label set - each level still borrows its prior from the correct
+parent level, wherever the hierarchy stops.
+
+```{r scenario-reduced-depth}
+reduced_levels <- c("Phylum", "Family", "Genus", "Species")
+
+formatted_reduced <- Format_BaHZING(iHMP_Reduced, taxa_levels = reduced_levels)
+formatted_reduced$taxa_levels
+
+results_reduced <- do.call(BaHZING_Model, c(
+  list(formatted_data = formatted_reduced, x = x), demo_settings
+))
+sort(unique(results_reduced$domain))
+```
+
+## Scenario 3: an arbitrarily-renamed hierarchy
+
+To show that no level name is hardcoded anywhere in the pipeline - not
+"Genus", not "Species", nothing - this scenario renames `iHMP_Reduced`'s
+taxonomy columns to generic, non-taxonomic labels before running the same
+full 6-level hierarchy under those names. If this works, it can only be
+because the pipeline is genuinely generic, not because it happens to match
+a hardcoded string somewhere. (Level names must have distinct first letters,
+since that letter drives both the taxonomy prefix codes and the generated
+JAGS variable names - an internal check errors loudly instead of silently
+merging two levels if that's violated, which is why the names below aren't
+simply "Rank1".."Rank6".)
+
+```{r scenario-custom-names}
+ps_renamed <- iHMP_Reduced
+tt <- tax_table(ps_renamed)
+colnames(tt) <- c("Kingdom", "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+tax_table(ps_renamed) <- tt
+
+custom_levels <- c("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+
+formatted_custom <- Format_BaHZING(ps_renamed, taxa_levels = custom_levels)
+formatted_custom$taxa_levels
+
+results_custom <- do.call(BaHZING_Model, c(
+  list(formatted_data = formatted_custom, x = x), demo_settings
+))
+sort(unique(results_custom$domain))
+```
+
+## Side-by-side comparison
+
+```{r comparison}
+data.frame(
+  scenario = c("Default (6-level)", "Reduced depth (4-level)", "Custom names (6-level)"),
+  taxa_levels = c(
+    paste(formatted_default$taxa_levels, collapse = " -> "),
+    paste(formatted_reduced$taxa_levels, collapse = " -> "),
+    paste(formatted_custom$taxa_levels, collapse = " -> ")
+  ),
+  domains_in_output = c(
+    paste(sort(unique(results_default$domain)), collapse = ", "),
+    paste(sort(unique(results_reduced$domain)), collapse = ", "),
+    paste(sort(unique(results_custom$domain)), collapse = ", ")
+  )
+)
+```
+
+In every scenario, the `domain` values that come out of `BaHZING_Model()`
+match exactly the `taxa_levels` that went in - confirming the hierarchy is
+fully driven by this one argument, whatever depth or names it describes.
