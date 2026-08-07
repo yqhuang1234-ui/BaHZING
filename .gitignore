@@ -12,3 +12,4 @@ dev/*.knit.md
 *.tar.gz
 .DS_Store
 .claude/
+presentation/
