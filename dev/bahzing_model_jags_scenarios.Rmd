@@ -119,10 +119,6 @@ compile_check <- function(taxa_levels, has_covar = FALSE, covar = NULL,
     level_data[[lvl]] <- list(data = df, R = ncol(df))
   }
 
-  # Real library-size offset.
-  L <- exposure_covar_dat[, taxon_columns] %>%
-    mutate(LibrarySize = rowSums(across(everything()))) %>% select(LibrarySize)
-
   # Counterfactual profiles for the g-estimation contrast (arbitrary but
   # valid values - their content doesn't matter for a compile-only check).
   profiles <- rbind(rep(-0.5, P), rep(0.5, P))
@@ -133,7 +129,7 @@ compile_check <- function(taxa_levels, has_covar = FALSE, covar = NULL,
 
   # Bundle everything into the same shape jags.model(data = ...) expects,
   # keyed the same way BaHZING_Model() builds jdata.
-  jdata <- list(N = N, Y = Y, R = R, X.q = X.q, P = P, profiles = profiles, L = L)
+  jdata <- list(N = N, Y = Y, R = R, X.q = X.q, P = P, profiles = profiles)
   for (lvl in names(level_data)) {
     jdata[[paste0(lvl, "Data")]] <- level_data[[lvl]]$data
     jdata[[paste0(lvl, ".R")]] <- level_data[[lvl]]$R
