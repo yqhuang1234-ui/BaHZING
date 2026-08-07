@@ -6,6 +6,7 @@ output:
     toc_float: true
     toc_depth: 3
     number_sections: true
+    highlight: tango
 ---
 
 ```{r setup, include = FALSE}
@@ -51,10 +52,18 @@ one shows the actual error text without halting the knit:
 
 ```{r error-helper}
 show_error <- function(expr) {
+  # tryCatch() intercepts the error rather than letting it halt the knit -
+  # each expected-error scenario can then show the actual message inline,
+  # as regular document output, instead of the whole document failing to build.
   result <- tryCatch(expr, error = function(e) e)
   if (inherits(result, "error")) {
+    # conditionMessage() pulls just the human-readable text out of the
+    # error condition object (not the full call/traceback).
     cat("ERROR:", conditionMessage(result), "\n")
   } else {
+    # Flags a scenario that was supposed to demonstrate a failure but
+    # didn't - a signal something's wrong with the scenario itself, not a
+    # normal outcome.
     cat("No error - unexpected for this scenario.\n")
   }
   invisible(result)
@@ -74,9 +83,20 @@ names:
 ```{r preview-table-helper}
 preview_table <- function(formatted_data, meta_cols = c("consent_age", "sex", "soft_drinks_dietnum"),
                           n_taxa = 3, n_rows = 5) {
+  # formatted_data$Table is Format_BaHZING()'s merged output (metadata +
+  # taxon-count columns together) - data.frame() applies R's column-name
+  # sanitization (check.names), the same step BaHZING_Model() relies on.
   tbl <- data.frame(formatted_data$Table)
+  # A handful of the (potentially hundreds of) taxon-count columns, picked
+  # from Format_BaHZING()'s own authoritative taxon_columns list rather
+  # than guessed by position or string-matching.
   taxa_cols <- head(formatted_data$taxon_columns, n_taxa)
+  # Just a few sample rows x a few representative columns - enough to see
+  # real values without dumping the entire (potentially 200+ column) table.
   preview <- tbl[seq_len(n_rows), c(meta_cols, taxa_cols)]
+  # DT::datatable() (not a static print) so long taxon-lineage column
+  # headers are sortable/scrollable and wrap via the CSS rule above,
+  # instead of overflowing or being truncated.
   datatable(preview, options = list(scrollX = TRUE, dom = "t"), class = "cell-border stripe")
 }
 ```
@@ -89,8 +109,17 @@ by `hierarchy_matrix_name()`'s own convention, not guessed here):
 
 ```{r preview-matrix-helper}
 preview_matrix <- function(formatted_data, matrix_name, n_rows = 5, n_cols = 5) {
+  # One of Format_BaHZING()'s binary incidence matrices, e.g.
+  # "Species.Genus.Matrix" - looked up by the exact name
+  # hierarchy_matrix_name() would generate for that level pair.
   m <- formatted_data[[matrix_name]]
+  # min(n_rows/n_cols, actual dim) guards against a smaller-than-requested
+  # matrix (e.g. a reduced-depth hierarchy with only a handful of families)
+  # - avoids an out-of-bounds subscript instead of silently recycling.
   preview <- as.data.frame(m[seq_len(min(n_rows, nrow(m))), seq_len(min(n_cols, ncol(m))), drop = FALSE])
+  # Same DT::datatable() treatment as preview_table() - a real data-frame
+  # preview (with row/column names visible) rather than R's default
+  # string-table print, which would truncate long taxon names.
   datatable(preview, options = list(scrollX = TRUE, dom = "t"), class = "cell-border stripe")
 }
 ```
@@ -150,6 +179,36 @@ chain):
 
 ```{r scenario-2-matrix}
 preview_matrix(formatted_reduced, "Family.Phylum.Matrix")
+```
+
+## 2b. Reduced-depth, middle-only hierarchy
+
+Unlike scenario 2 (which still starts at `Phylum` and ends at `Species`),
+this one starts *after* `Phylum` and ends *before* `Genus`/`Species` -
+`Class`/`Order`/`Family` only. Confirms `taxa_levels` doesn't need to touch
+either true biological end of the taxonomy: `Format_BaHZING()` treats
+whatever's passed as the complete hierarchy, regardless of what broader or
+narrower ranks exist in the raw `tax_table`.
+
+```{r scenario-2b}
+middle_levels <- c("Class", "Order", "Family")
+formatted_middle <- Format_BaHZING(iHMP_Reduced, taxa_levels = middle_levels)
+formatted_middle$taxa_levels
+names(formatted_middle)
+# Confirm no Phylum/Genus/Species matrices leaked through
+any(grepl("Phylum|Genus|Species", names(formatted_middle)))
+```
+
+```{r scenario-2b-preview}
+preview_table(formatted_middle)
+```
+
+`Order.Class.Matrix` - the broadest pair in this reduced range (`Class` has
+no parent here, even though it has one, `Phylum`, in the raw data - it's
+simply not part of this `taxa_levels`):
+
+```{r scenario-2b-matrix}
+preview_matrix(formatted_middle, "Order.Class.Matrix")
 ```
 
 ## 3. Fully custom-named hierarchy

@@ -1,0 +1,457 @@
+---
+title: "BaHZING_Model(): JAGS Model-Text Generation Scenario Testing"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+```{css, echo = FALSE}
+pre {
+  max-height: 420px;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+```
+
+```{r libs, message = FALSE}
+pkgload::load_all(".", quiet = TRUE)
+library(phyloseq)
+library(dplyr)
+library(R2jags)
+library(rjags)
+```
+
+## Overview
+
+This is a developer/QA verification document for `BaHZING_Model()`'s JAGS
+model-text generation - `.bahzing_build_model_text()` and the generator
+functions it's built from (`.bahzing_level_vars()`, `.bahzing_level_block()`,
+`.bahzing_narrowest_level_block()`). It's a companion to
+`dev/format_bahzing_scenarios.Rmd`, but tests a different function: that
+document covers `Format_BaHZING()`'s handling of raw phyloseq-data edge
+cases (missing levels, NA values, duplicate names, Kingdom/Domain presence,
+...), almost none of which are inputs to JAGS text generation at all - the
+generator only ever depends on two things, `taxa_levels` and `has_covar`.
+So the scenarios here are about hierarchy *shape* (depth, naming, position
+within the full taxonomy) and structural correctness of the generated text,
+not data quality.
+
+Each scenario does two things:
+
+1. Shows the actual, full generated JAGS model text (scrollable, not truncated).
+2. **Compiles it with `jags.model()`** against real (tiny) data derived from
+   `iHMP_Reduced`, running only the graph-compilation step (`n.adapt = 5`,
+   no `update()`/`coda.samples()`) - so this confirms the text is genuinely
+   valid, parseable JAGS syntax, verified by the JAGS engine itself, not
+   just plausible-looking text matched by our own regexes. This is new
+   coverage beyond `tests/testthat/test-bahzing_jags_generator.R`'s
+   string/fixture checks. The "Adaptation incomplete" warning JAGS emits is
+   expected and benign here - `n.adapt = 5` is deliberately tiny since we
+   only care about successful compilation, not converged adaptation.
+
+```{r data}
+data("iHMP_Reduced")
+```
+
+Helpers used throughout:
+
+```{r error-helper}
+show_error <- function(expr) {
+  result <- tryCatch(expr, error = function(e) e)
+  if (inherits(result, "error")) {
+    cat("ERROR:", conditionMessage(result), "\n")
+  } else {
+    cat("No error - unexpected for this scenario.\n")
+  }
+  invisible(result)
+}
+```
+
+`compile_check()` builds the same inputs `BaHZING_Model()`'s early sections
+(1-4) would, generates the model text, and compiles it. `.bahzing_build_model_text()`
+alone would only give back the text itself - the same "does it look right"
+check `test-bahzing_jags_generator.R` already does via regex/fixture
+matching. Everything else here exists purely to hand that text to
+`jags.model()` for real, independent validation: JAGS needs actual data
+bound to every variable the text references (`N`, `R`, `Y`, `GenusData`,
+`Genus.R`, ...), so this reconstructs real inputs the same way
+`BaHZING_Model()` itself does, then lets the JAGS engine - not our own
+string-matching - decide whether the text is valid.
+
+`phyloseq_obj` defaults to the unmodified `iHMP_Reduced`, but can be swapped
+out (e.g. for the custom-named scenario, which needs a phyloseq object with
+renamed `tax_table` columns) while still going through the same real
+compile check as every other scenario.
+
+```{r compile-check-helper}
+compile_check <- function(taxa_levels, has_covar = FALSE, covar = NULL,
+                           phyloseq_obj = iHMP_Reduced) {
+  # Real formatted data for this scenario's hierarchy - same call
+  # BaHZING_Model() itself would make.
+  formatted_data <- Format_BaHZING(phyloseq_obj, taxa_levels = taxa_levels)
+  exposure_covar_dat <- data.frame(formatted_data$Table)
+
+  # Real exposure data (X) and its standardized form (X.q) - mirrors
+  # BaHZING_Model()'s section 3 with exposure_standardization = "standard_normal".
+  x <- c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")
+  X <- exposure_covar_dat[x]; P <- ncol(X); X.q <- scale(X)
+
+  # Real outcome data (Y): the narrowest level's taxon-count columns.
+  taxon_columns <- formatted_data$taxon_columns
+  Y <- exposure_covar_dat[, taxon_columns]; N <- nrow(Y); R <- ncol(Y)
+
+  # Real incidence-matrix data + taxon counts for every level except the
+  # narrowest, e.g. GenusData/Genus.R, FamilyData/Family.R - mirrors
+  # BaHZING_Model()'s section 4 level_data loop.
+  level_data <- list()
+  for (i in seq_len(length(taxa_levels) - 1)) {
+    lvl <- taxa_level_name(taxa_levels, i)
+    mat_name <- hierarchy_matrix_name(taxa_levels, i)
+    df <- as.data.frame(t(formatted_data[[mat_name]]))
+    level_data[[lvl]] <- list(data = df, R = ncol(df))
+  }
+
+  # Real library-size offset.
+  L <- exposure_covar_dat[, taxon_columns] %>%
+    mutate(LibrarySize = rowSums(across(everything()))) %>% select(LibrarySize)
+
+  # Counterfactual profiles for the g-estimation contrast (arbitrary but
+  # valid values - their content doesn't matter for a compile-only check).
+  profiles <- rbind(rep(-0.5, P), rep(0.5, P))
+
+  # The actual code under test: generate the JAGS model text for this
+  # taxa_levels/has_covar combination.
+  generated <- .bahzing_build_model_text(taxa_levels, has_covar)
+
+  # Bundle everything into the same shape jags.model(data = ...) expects,
+  # keyed the same way BaHZING_Model() builds jdata.
+  jdata <- list(N = N, Y = Y, R = R, X.q = X.q, P = P, profiles = profiles, L = L)
+  for (lvl in names(level_data)) {
+    jdata[[paste0(lvl, "Data")]] <- level_data[[lvl]]$data
+    jdata[[paste0(lvl, ".R")]] <- level_data[[lvl]]$R
+  }
+  if (has_covar) {
+    W <- data.frame(exposure_covar_dat[covar]); jdata$Q <- ncol(W); jdata$W <- W
+  }
+
+  # The real validation step: hand the generated text + real data to JAGS
+  # itself. n.adapt = 5 (deliberately tiny) means only the graph-compilation
+  # step matters here - no update()/coda.samples(), so this stays fast while
+  # still getting genuine engine-level validation. tryCatch() turns a
+  # compile failure into a readable status string instead of halting the knit.
+  compiled <- tryCatch({
+    suppressWarnings(jags.model(file = textConnection(generated), data = jdata,
+                                 n.chains = 1, n.adapt = 5, quiet = TRUE))
+    "OK"
+  }, error = function(e) paste("COMPILE ERROR:", conditionMessage(e)))
+  list(text = generated, compiled = compiled, taxa_levels = taxa_levels)
+}
+```
+
+`show_jags()` prints generated text as a syntax-highlighted, scrollable
+fenced code block (via `results = 'asis'`) instead of plain `cat()` output -
+JAGS's syntax (`~`, `<-`, `for`, `#` comments) highlights reasonably well
+under R's highlighter, and reads far more clearly than the default gray
+console-output styling for a block this dense:
+
+```{r show-jags-helper}
+show_jags <- function(text) {
+  cat("\n```r\n")
+  cat(text)
+  cat("\n```\n")
+}
+```
+
+A line-level "set difference" helper for the with/without-covariates and
+legacy-equivalence comparisons - shows only the lines that differ between
+two texts, in either direction:
+
+```{r diff-helper}
+show_diff <- function(text_a, text_b, label_a = "A", label_b = "B") {
+  lines_a <- strsplit(text_a, "\n")[[1]]
+  lines_b <- strsplit(text_b, "\n")[[1]]
+  only_a <- setdiff(lines_a, lines_b)
+  only_b <- setdiff(lines_b, lines_a)
+  cat("Lines only in", label_a, paste0("(", length(only_a), "):"), "\n")
+  if (length(only_a)) cat(paste0("  ", only_a), sep = "\n") else cat("  (none)\n")
+  cat("\nLines only in", label_b, paste0("(", length(only_b), "):"), "\n")
+  if (length(only_b)) cat(paste0("  ", only_b), sep = "\n") else cat("  (none)\n")
+}
+```
+
+Same normalizer `test-bahzing_jags_generator.R` uses (strips comments and
+all whitespace, collapsing the whole text to one line) - good for a
+single overall "do these match" check, but useless for showing *which*
+lines differ, since normalizing erases line breaks entirely:
+
+```{r normalize-helper}
+normalize_jags <- function(text) {
+  text <- gsub("#[^\n]*", "", text)
+  text <- gsub("\\s+", "", text)
+  text
+}
+read_fixture <- function(name) {
+  paste(readLines(file.path("..", "tests", "testthat", "fixtures", name)), collapse = "\n")
+}
+```
+
+For showing *which* lines actually differ, `normalize_line()` applies the
+same idea (strip comments, strip whitespace) one line at a time instead -
+this keeps line breaks intact, so `show_diff_normalized()` can isolate
+genuinely different lines (different variable names/structure) while
+ignoring purely cosmetic differences (comment wording, spacing) that would
+otherwise clutter a raw line-by-line diff. Blank/comment-only lines
+normalize to `""` and are dropped entirely (`Filter(nzchar, ...)`), since
+"this line used to have a comment, now it doesn't" isn't a meaningful
+difference to report here:
+
+```{r normalize-line-helper}
+normalize_line <- function(line) {
+  line <- gsub("#.*$", "", line)
+  line <- gsub("\\s+", "", line)
+  line
+}
+
+show_diff_normalized <- function(text_a, text_b, label_a = "A", label_b = "B") {
+  lines_a <- Filter(nzchar, vapply(strsplit(text_a, "\n")[[1]], normalize_line, character(1), USE.NAMES = FALSE))
+  lines_b <- Filter(nzchar, vapply(strsplit(text_b, "\n")[[1]], normalize_line, character(1), USE.NAMES = FALSE))
+  only_a <- setdiff(lines_a, lines_b)
+  only_b <- setdiff(lines_b, lines_a)
+  cat("Lines only in", label_a, paste0("(", length(only_a), "):"), "\n")
+  if (length(only_a)) cat(paste0("  ", only_a), sep = "\n") else cat("  (none)\n")
+  cat("\nLines only in", label_b, paste0("(", length(only_b), "):"), "\n")
+  if (length(only_b)) cat(paste0("  ", only_b), sep = "\n") else cat("  (none)\n")
+}
+```
+
+# Hierarchy shape
+
+## 1. Default 6-level hierarchy, no covariates
+
+```{r scenario-1}
+result_1 <- compile_check(default_taxa_levels, has_covar = FALSE)
+cat("compiled:", result_1$compiled, "\n")
+```
+
+Full generated text (syntax-highlighted, scrolls within its own box):
+
+```{r scenario-1-text, echo = FALSE, results = 'asis'}
+show_jags(result_1$text)
+```
+
+## 2. Default 6-level hierarchy, with covariates
+
+```{r scenario-2}
+result_2 <- compile_check(default_taxa_levels, has_covar = TRUE, covar = "consent_age")
+cat("compiled:", result_2$compiled, "\n")
+```
+
+Diff against scenario 1 - should isolate to covariate-only lines
+(`delta`/`delta.zero`, the `inprod(delta...)` terms in the likelihood, and
+the `for(q in 1:Q)` prior block):
+
+```{r scenario-2-diff}
+show_diff(result_1$text, result_2$text, "no-covar (#1)", "with-covar (#2)")
+```
+
+## 3. Reduced-depth hierarchy
+
+`c("Phylum", "Family", "Genus", "Species")` - skips `Class`/`Order`.
+
+```{r scenario-3}
+result_3 <- compile_check(c("Phylum", "Family", "Genus", "Species"))
+cat("compiled:", result_3$compiled, "\n")
+cat("No Class/Order blocks:", !grepl("class\\.|order\\.", result_3$text), "\n")
+cat("Family borrows directly from Phylum:",
+    grepl("mu\\.phylum\\[f\\.r,p\\] <- inprod\\(phylum\\.beta", result_3$text), "\n")
+```
+
+Full generated text:
+
+```{r scenario-3-text, echo = FALSE, results = 'asis'}
+show_jags(result_3$text)
+```
+
+## 3b. Reduced-depth, middle-only hierarchy
+
+`c("Class", "Order", "Family")` - starts after `Phylum`, ends before
+`Genus`/`Species`. Stress-tests that "broadest"/"narrowest" are purely
+positional within whatever `taxa_levels` is passed, not tied to the true
+biological top/bottom of the taxonomy.
+
+```{r scenario-3b}
+result_3b <- compile_check(c("Class", "Order", "Family"))
+cat("compiled:", result_3b$compiled, "\n")
+cat("Class (broadest here) gets a flat no-parent prior:\n")
+cat("  ", grepl("class\\.beta\\[c\\.r,p\\] ~ dnorm\\(0,", result_3b$text), "\n")
+cat("  (no mu node keyed by Class's own index):",
+    !grepl("mu\\.[a-z]+\\[c\\.r", result_3b$text), "\n")
+cat("Family (narrowest here) gets the full data likelihood:\n")
+cat("  ", grepl("Y\\[i,r\\] ~ dnegbin", result_3b$text), "\n")
+```
+
+Full generated text:
+
+```{r scenario-3b-text, echo = FALSE, results = 'asis'}
+show_jags(result_3b$text)
+```
+
+## 4. Fully custom-named hierarchy
+
+`c("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")`.
+
+```{r scenario-4}
+ps_renamed <- iHMP_Reduced
+tt <- tax_table(ps_renamed)
+colnames(tt) <- c("Domain", "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+tax_table(ps_renamed) <- tt
+
+custom_levels <- c("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+result_4 <- compile_check(custom_levels, phyloseq_obj = ps_renamed)
+generated_custom <- result_4$text
+cat("compiled:", result_4$compiled, "\n")
+cat("No leaked 'genus'/'family' literal from the default hierarchy:",
+    !grepl("genus\\.|family\\.", generated_custom), "\n")
+```
+
+Full generated text:
+
+```{r scenario-4-text, echo = FALSE, results = 'asis'}
+show_jags(generated_custom)
+```
+
+## 5. Minimum-size hierarchy
+
+`c("Phylum", "Species")` - exactly 2 levels, the smallest
+`validate_taxa_levels()` allows.
+
+```{r scenario-5}
+result_5 <- compile_check(c("Phylum", "Species"))
+cat("compiled:", result_5$compiled, "\n")
+```
+
+## 6. Below-minimum hierarchy (expected error)
+
+`c("Phylum")` - only 1 level, rejected by `validate_taxa_levels()` before
+`Format_BaHZING()` even reaches the raw `tax_table`.
+
+```{r scenario-6}
+show_error(Format_BaHZING(iHMP_Reduced, taxa_levels = c("Phylum")))
+```
+
+# Structural correctness
+
+Using scenario 4's custom-named text (`generated_custom`) as the actual
+test - the same properties `test-bahzing_jags_generator.R` checks
+programmatically, shown here directly. Meaningless names (`Alpha`/`Bravo`/
+...) are the *stronger* check: if these properties only held for familiar
+biological names, that wouldn't rule out the code still secretly
+special-casing "Phylum"/"Genus"/"Species" somewhere - using arbitrary names
+proves the logic is driven purely by position within `taxa_levels`, not by
+recognizing expected taxonomic terms.
+
+Each also includes a **classic-naming cross-check** against scenario 1's
+default-hierarchy text (`result_1$text`, `Phylum`/`Genus`/`Species`) purely
+for readability - not a stronger test than the custom-named one (same logic,
+familiar names), just easier to sanity-check against your own mental model
+of the biology at a glance.
+
+## 7. Broadest level has no parent
+
+```{r scenario-7}
+cat("Custom-named (Alpha):\n")
+cat("  Flat dnorm(0, ...) prior:",
+    grepl("alpha\\.beta\\[a\\.r,p\\] ~ dnorm\\(0,", generated_custom), "\n")
+cat("  No mu node keyed by Alpha's own index:",
+    !grepl("mu\\.[a-z]+\\[a\\.r", generated_custom), "\n")
+
+cat("Classic-naming cross-check (Phylum):\n")
+cat("  Flat dnorm(0, ...) prior:",
+    grepl("phylum\\.beta\\[p\\.r,p\\] ~ dnorm\\(0,", result_1$text), "\n")
+cat("  No mu node keyed by Phylum's own index:",
+    !grepl("mu\\.[a-z]+\\[p\\.r", result_1$text), "\n")
+```
+
+## 8. Narrowest level has the full data likelihood
+
+```{r scenario-8}
+cat("Custom-named (Foxtrot):\n")
+cat("  Y[i,r] ~ dnegbin(...):", grepl("Y\\[i,r\\] ~ dnegbin", generated_custom), "\n")
+cat("  zero[i,r] ~ dbern(...):", grepl("zero\\[i,r\\] ~ dbern", generated_custom), "\n")
+cat("  disp[r] prior:", grepl("disp\\[r\\] ~ dunif", generated_custom), "\n")
+cat("  alpha[r]/alpha.zero[r] intercepts:",
+    grepl("alpha\\[r\\] ~ dnorm", generated_custom) &&
+      grepl("alpha\\.zero\\[r\\] ~ dnorm", generated_custom), "\n")
+
+cat("Classic-naming cross-check (Species):\n")
+cat("  Y[i,r] ~ dnegbin(...):", grepl("Y\\[i,r\\] ~ dnegbin", result_1$text), "\n")
+cat("  zero[i,r] ~ dbern(...):", grepl("zero\\[i,r\\] ~ dbern", result_1$text), "\n")
+cat("  disp[r] prior:", grepl("disp\\[r\\] ~ dunif", result_1$text), "\n")
+cat("  alpha[r]/alpha.zero[r] intercepts:",
+    grepl("alpha\\[r\\] ~ dnorm", result_1$text) &&
+      grepl("alpha\\.zero\\[r\\] ~ dnorm", result_1$text), "\n")
+```
+
+## 9. Mid-hierarchy level borrows from its immediate parent
+
+```{r scenario-9}
+cat("Custom-named (Charlie borrows from Bravo):\n")
+cat("  ", grepl("mu\\.bravo\\[c\\.r,p\\] <- inprod\\(bravo\\.beta\\[1:Bravo\\.R,p\\], BravoData\\[c\\.r,1:Bravo\\.R\\]\\)",
+                 generated_custom), "\n")
+cat("  Not borrowing from any other level (e.g. Alpha or Delta):",
+    !grepl("mu\\.alpha\\[c\\.r|mu\\.delta\\[c\\.r", generated_custom), "\n")
+
+cat("Classic-naming cross-check (Genus borrows from Family):\n")
+cat("  ", grepl("mu\\.family\\[g\\.r,p\\] <- inprod\\(family\\.beta\\[1:Family\\.R,p\\], FamilyData\\[g\\.r,1:Family\\.R\\]\\)",
+                 result_1$text), "\n")
+cat("  Not borrowing from any other level (e.g. Order or Class):",
+    !grepl("mu\\.order\\[g\\.r|mu\\.class\\[g\\.r", result_1$text), "\n")
+```
+
+# Legacy equivalence
+
+## 10. Diff against the true original hand-written model
+
+`dev/legacy_model_true_original_{without,with}_covar.txt` are extracted
+directly from git history (`git show 3d0b2ac:tests/testthat/fixtures/legacy_model_*.txt`)
+- the commit that captured BaHZING's original hand-written model text,
+*before* the one deliberate naming change this session made to it (the
+narrowest level's precision/borrowed-mean nodes, made consistent with every
+other level - see `.bahzing_exposure_prior_block()`'s docs in
+`R/BaHZING_Model.R`). Unlike `tests/testthat/fixtures/legacy_model_*.txt`
+(which *were* edited in place to track that change, so they no longer
+represent the original), these are a frozen, unedited snapshot - comparing
+against them directly avoids the earlier confusion between "the reference
+the test suite currently uses" and "what BaHZING originally shipped."
+
+```{r scenario-10-read-true-original}
+true_original_without <- paste(readLines("legacy_model_true_original_without_covar.txt"), collapse = "\n")
+true_original_with <- paste(readLines("legacy_model_true_original_with_covar.txt"), collapse = "\n")
+```
+
+Whole-text comparison, normalized (comments/whitespace stripped) - expected
+to be `FALSE` for both, precisely *because* of that one intentional
+difference:
+
+```{r scenario-10-normalized}
+cat("Scenario 1 (no covar) identical to true original, normalized:",
+    identical(normalize_jags(result_1$text), normalize_jags(true_original_without)), "\n")
+cat("Scenario 2 (with covar) identical to true original, normalized:",
+    identical(normalize_jags(result_2$text), normalize_jags(true_original_with)), "\n")
+```
+
+`show_diff_normalized()` shows *which* lines actually differ, with
+formatting-only noise (comment wording, spacing) filtered out - should
+show only the 8 lines of the documented naming change, nothing else:
+
+```{r scenario-10-line-diff}
+show_diff_normalized(true_original_without, result_1$text, "true original", "current")
+```
