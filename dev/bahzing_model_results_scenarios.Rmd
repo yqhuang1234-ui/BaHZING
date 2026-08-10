@@ -73,11 +73,12 @@ can be overridden for the custom-named scenario, which needs a phyloseq
 object with renamed `tax_table` columns:
 
 ```{r run-scenario-helper}
-run_scenario <- function(taxa_levels, covar = "consent_age", phyloseq_obj = iHMP_Reduced) {
+run_scenario <- function(taxa_levels, covar = "consent_age", phyloseq_obj = iHMP_Reduced,
+                          x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")) {
   formatted_data <- Format_BaHZING(phyloseq_obj, taxa_levels = taxa_levels)
   BaHZING_Model(
     formatted_data = formatted_data,
-    x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum"),
+    x = x,
     covar = covar,
     n.chains = 2, n.adapt = 60, n.iter.burnin = 2, n.iter.sample = 50,
     seed = 20260728, verbose = FALSE
@@ -217,4 +218,26 @@ instead of `Family`.
 result_5 <- run_scenario(c("Phylum", "Species"))
 summarize_results(result_5)
 plot_domain_results(result_5, "Phylum")
+```
+
+## 6. Default 6-level hierarchy, single exposure, with covariate
+
+Same `default_taxa_levels` hierarchy as Scenario 1, but with only one
+exposure (`soft_drinks_dietnum`) instead of two, keeping the default
+`consent_age` covariate.
+
+```{r scenario-6}
+result_6 <- run_scenario(default_taxa_levels, x = "soft_drinks_dietnum")
+summarize_results(result_6)
+plot_domain_results(result_6, "Family")
+```
+
+## 7. Default 6-level hierarchy, single exposure, without covariate
+
+Same as Scenario 6, but with `covar = NULL` - no covariates in the model.
+
+```{r scenario-7}
+result_7 <- run_scenario(default_taxa_levels, covar = NULL, x = "soft_drinks_dietnum")
+summarize_results(result_7)
+plot_domain_results(result_7, "Family")
 ```
