@@ -5,3 +5,5 @@
 .DS_Store
 temp*.txt
 tests/testthat/testthat-problems.rds
+.Rcheck/
+.tar.gz
