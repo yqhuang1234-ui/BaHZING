@@ -1,0 +1,9 @@
+utils::globalVariables(c(
+  ".",
+  "id",
+  "exposure",
+  "lcl",
+  "ucl",
+  "p_value",
+  "model"
+))

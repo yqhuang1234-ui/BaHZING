@@ -1,0 +1,42 @@
+Package: BaHZING
+Title: Bayesian Hierarchical Zero-Inflated Negative Binomial Regression
+        with G-Computation
+Version: 1.1.0
+Authors@R: c(
+    person("Hailey", "Hampson", , "hhampson@usc.edu", role = "aut"),
+    person("Jesse", "Goodrich", , "jagoodri@usc.edu", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0001-6615-0472")),
+    person("Hongxu", "Wang", , "hongxuwa@usc.edu", role = "aut"),
+    person("Tanya", "Alderete", , "taldere1@jhu.edu", role = "ctb"),
+    person("Shardul", "Nazirkar", , "nazirkar@usc.edu", role = "ctb"),
+    person("David", "Conti", , "dconti@usc.edu", role = "aut")
+  )
+Description: A Bayesian model for examining the association between
+    environmental mixtures and all taxa measured in a hierarchical
+    microbiome dataset in a single integrated analysis. Compared with
+    analyzing associations of environmental mixtures with each taxon
+    individually, 'BaHZING' controls Type I error rates and provides more
+    stable effect estimates when dealing with small sample sizes.
+License: GPL (>= 3)
+URL: https://github.com/Goodrich-Lab/BaHZING
+BugReports: https://github.com/Goodrich-Lab/BaHZING/issues
+Depends: R (>= 4.1.0), rjags (>= 4.0.0)
+Imports: bayestestR, coda, dplyr, glue, magrittr, phyloseq, pscl,
+        purrr, qgcomp, R2jags, stats, stringr, tibble, tidyr, tidylog
+Suggests: testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+SystemRequirements: JAGS 4.x.y (https://mcmc-jags.sourceforge.io/)
+NeedsCompilation: no
+Packaged: 2026-08-21 17:38:01 UTC; hongxuwa
+Author: Hailey Hampson [aut],
+  Jesse Goodrich [aut, cre] (ORCID:
+    <https://orcid.org/0000-0001-6615-0472>),
+  Hongxu Wang [aut],
+  Tanya Alderete [ctb],
+  Shardul Nazirkar [ctb],
+  David Conti [aut]
+Maintainer: Jesse Goodrich <jagoodri@usc.edu>
