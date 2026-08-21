@@ -72,6 +72,14 @@ jobs:
           extra-packages: any::rcmdcheck
           needs: check
 
+      # The cached macOS arm64 binary of rjags may reference JAGS under
+      # /usr/local, while Homebrew installs JAGS under /opt/homebrew. Building
+      # rjags here links it against the JAGS installation on this runner.
+      - name: Reinstall rjags from source (macOS)
+        if: runner.os == 'macOS'
+        run: install.packages("rjags", type = "source")
+        shell: Rscript {0}
+
       - uses: r-lib/actions/check-r-package@v2
         with:
           upload-snapshots: true
