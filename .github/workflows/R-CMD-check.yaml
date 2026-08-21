@@ -62,23 +62,17 @@ jobs:
           del wjags.exe
         shell: cmd
 
-        # Install JAGS on Mac OS
+      # Install JAGS on Mac OS
       - name: Install jags (macOS-latest)
         if: runner.os == 'macOS'
-        run : brew install pkg-config; brew install jags
+        run: |
+          curl -L -o jags.pkg 'https://sourceforge.net/projects/mcmc-jags/files/JAGS/4.x/Mac%20OS%20X/JAGS-4.3.2.pkg/download'
+          sudo installer -pkg jags.pkg -target /
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           extra-packages: any::rcmdcheck
           needs: check
-
-      # The cached macOS arm64 binary of rjags may reference JAGS under
-      # /usr/local, while Homebrew installs JAGS under /opt/homebrew. Building
-      # rjags here links it against the JAGS installation on this runner.
-      - name: Reinstall rjags from source (macOS)
-        if: runner.os == 'macOS'
-        run: install.packages("rjags", type = "source")
-        shell: Rscript {0}
 
       - uses: r-lib/actions/check-r-package@v2
         with:
