@@ -12,7 +12,7 @@ coverage](https://codecov.io/gh/Goodrich-Lab/BaHZING/branch/main/graph/badge.svg
 ## Contents
 
 - [Overview](#overview)
-- [Installation](#overview)
+- [Installation](#installation)
 - [Example](#example)
 
 ## Overview
@@ -102,8 +102,9 @@ covar <- c("consent_age")
 
 ### Perform BaH-ZING
 # NOTE: For this example, we are using a small number of iterations to reduce 
-# the runtime. For a real analysis, we recommend using n.chain = 3, 
-# n.adapt, n.burnin, and n.sample > 5000.
+# the runtime. For a real analysis, we recommend using n.chains = 3 and
+# carefully selecting n.adapt, n.iter.burnin, and n.iter.sample after
+# assessing convergence and effective sample size.
 bahzing_resout <- BaHZING_Model(formatted_data,
                          x = x,
                          covar = covar,

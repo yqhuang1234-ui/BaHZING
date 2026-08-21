@@ -84,7 +84,7 @@
 #' @name BaHZING_Model
 
 # Declare global variables
-globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
+globalVariables(c("X2.5.", "X97.5.", "Mean",
                   "Exposure.Index", "taxa_index", "taxa_full",
                   "component", "estimate", "bci_lcl", "bci_ucl",
                   "domain", "taxa_name", "pdir","prope","pmap",
@@ -526,13 +526,6 @@ BaHZING_Model <- function(formatted_data,
   Phylum.R <- ncol(PhylumData)
   numPhylumPerClass <- as.numeric(apply(PhylumData, 1, sum))
 
-  ## Create Library Size Offset
-  L <- exposure_covar_dat[, grep("^[kd]__", names(exposure_covar_dat))]
-  L <- L %>%
-    mutate(LibrarySize=rowSums(across(everything())))
-  L <- L %>%
-    select(LibrarySize)
-
   # 5. Return "Sanity" Messages ----
   if(verbose == TRUE){
     message("#### Checking input data ####")
@@ -568,7 +561,7 @@ BaHZING_Model <- function(formatted_data,
                 Order.R=Order.R, OrderData=OrderData,
                 Class.R=Class.R, ClassData=ClassData,
                 Phylum.R=Phylum.R, PhylumData=PhylumData,
-                profiles=profiles, L=L)
+                profiles=profiles)
   if (!is.null(covar)) {
     jdata$Q <- Q
     jdata$W <- W
@@ -609,8 +602,22 @@ BaHZING_Model <- function(formatted_data,
     chain[[1]]
   }
 
-  chain_list <- parallel::mclapply(seq_len(n.chains), run_one_chain,
-                                   mc.cores = min(n.chains, parallel::detectCores()))
+  detected_cores <- parallel::detectCores()
+
+  if (is.na(detected_cores) || detected_cores < 1L) {
+    detected_cores <- 1L}
+  
+  n_cores <- min(n.chains, detected_cores)
+
+  chain_list <- if (n_cores == 1L || .Platform$OS.type == "windows") {
+  lapply(seq_len(n.chains), run_one_chain)
+  } else {
+  parallel::mclapply(
+    seq_len(n.chains),
+    run_one_chain,
+    mc.cores = n_cores
+  )
+  }
   # mclapply returns a try-error object per-fork on failure instead of
   # propagating it - surface that clearly instead of failing downstream with
   # a confusing coda/as.mcmc.list error. A try-error is a character vector
@@ -778,4 +785,3 @@ BaHZING_Model <- function(formatted_data,
   }
   return(results2)
 }
-

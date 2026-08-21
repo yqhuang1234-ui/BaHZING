@@ -86,7 +86,7 @@
 #' @name Ridge_BaHZING_Model
 
 # Declare global variables
-globalVariables(c("LibrarySize", "X2.5.", "X97.5.", "Mean",
+globalVariables(c("X2.5.", "X97.5.", "Mean",
                   "Exposure.Index", "taxa_index", "taxa_full",
                   "component", "estimate", "bci_lcl", "bci_ucl",
                   "domain", "taxa_name", "pdir","prope","pmap",
@@ -260,13 +260,6 @@ Ridge_BaHZING_Model <- function(formatted_data,
   PhylumData <- as.matrix(ClassData) %*% Z.c.p %>% as.data.frame()
   Phylum.R <- ncol(PhylumData)
 
-  ## Create Library Size Offset
-  L <- exposure_covar_dat[, grep("k__", names(exposure_covar_dat))]
-  L <- L %>%
-    mutate(LibrarySize=rowSums(across(everything())))
-  L <- L %>%
-    select(LibrarySize)
-
   # 5. Return "Sanity" Messages ----
   if(verbose == TRUE){
     message("#### Checking input data ####")
@@ -409,10 +402,10 @@ Ridge_BaHZING_Model <- function(formatted_data,
     # Prepare data list
     if (is.null(W)|is.null(Q)){
       jdata <- list(N=N, Y=data, P.s=num, X.q=X.q, P.e=P,
-                    profiles=profiles, L=L)
+                    profiles=profiles)
     }else{
       jdata <- list(N=N, Y=data, P.s=num, X.q=X.q, P.e=P, W=W, Q=Q,
-                    profiles=profiles, L=L)
+                    profiles=profiles)
     }
     # Variables to monitor
     var.s <- c("beta", "beta.zero","psi","disp")
@@ -446,9 +439,24 @@ Ridge_BaHZING_Model <- function(formatted_data,
                             thin=1, progress.bar="none")
       chain[[1]]
     }
+    
+    detected_cores <- parallel::detectCores()
+    
+    if (is.na(detected_cores) || detected_cores < 1L) {
+      detected_cores <- 1L}
+  
+    n_cores <- min(n.chains, detected_cores)
 
-    chain_list <- parallel::mclapply(seq_len(n.chains), run_one_chain,
-                                     mc.cores = min(n.chains, parallel::detectCores()))
+    chain_list <- if (n_cores == 1L || .Platform$OS.type == "windows") {
+      lapply(seq_len(n.chains), run_one_chain)
+    } else {
+      parallel::mclapply(
+        seq_len(n.chains),
+        run_one_chain,
+        mc.cores = n_cores
+    )
+    }
+    
     failed <- vapply(chain_list, function(x) inherits(x, "try-error"), logical(1))
     if (any(failed)) {
       msgs <- vapply(chain_list[failed], function(x) {
@@ -611,4 +619,3 @@ Ridge_BaHZING_Model <- function(formatted_data,
 
   return(results2)
   }
-

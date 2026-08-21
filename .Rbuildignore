@@ -8,3 +8,8 @@
 ^dev$
 ^cran-comments\.md$
 ^CRAN-SUBMISSION$
+^\.DS_Store$
+^\.RData$
+^\.Rhistory$
+^temp.*\.txt$
+^tests/testthat/testthat-problems\.rds$

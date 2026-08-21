@@ -9,7 +9,7 @@
 #' @import stringr
 #' @import qgcomp
 #' @importFrom utils globalVariables
-#' @importFrom stats quantile update
+#' @importFrom stats as.formula poisson quantile sd update
 #' @importFrom purrr map_dfr
 #' @param formatted_data An object containing formatted microbiome data.
 #' @param x A vector of column names of the exposures.
@@ -181,4 +181,3 @@ ZIP_qgcomp <- function(formatted_data,
 
   return(res2)
 }
-
