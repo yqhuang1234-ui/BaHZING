@@ -16,12 +16,15 @@ in R code analysis.
 
 ## Test environments
 
-* macOS Sequoia 15.7.4, R 4.5.2
-* Windows, R-release
-* Ubuntu Linux, R-devel
-* Ubuntu Linux, R-release
-* Ubuntu Linux, R-oldrel
+* Local: macOS Sequoia 15.7.4, R 4.5.2
+* GitHub Actions: macOS, R-release
+* GitHub Actions: Windows, R-release
+* GitHub Actions: Ubuntu Linux, R-devel
+* GitHub Actions: Ubuntu Linux, R-release
+* GitHub Actions: Ubuntu Linux, R-oldrel
 
 ## Notes
 
+* The remaining NOTE is the expected CRAN incoming note that this is a new
+  submission of a package that was previously archived, as explained above.
 * JAGS 4.x.y is required, as declared in SystemRequirements.
