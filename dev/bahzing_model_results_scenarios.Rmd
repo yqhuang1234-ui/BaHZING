@@ -1,0 +1,243 @@
+---
+title: "BaHZING_Model(): Full End-to-End Results Scenario Testing"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+```{css, echo = FALSE}
+pre {
+  max-height: 420px;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+table.dataTable thead th {
+  white-space: normal !important;
+  word-break: break-word;
+  max-width: 160px;
+}
+```
+
+```{r libs, message = FALSE}
+pkgload::load_all(".", quiet = TRUE)
+library(phyloseq)
+library(DT)
+library(ggplot2)
+```
+
+## Overview
+
+Unlike the other two QA docs - `dev/format_bahzing_scenarios.Rmd`
+(`Format_BaHZING()`'s data handling) and `dev/bahzing_model_jags_scenarios.Rmd`
+(`BaHZING_Model()`'s JAGS *text generation*, verified via `jags.model()`
+compile-checks only, no actual sampling) - this one runs the **full
+end-to-end pipeline**: format data, fit the model, and produce a real
+results table and a real downstream visualization, following the
+summarize-and-plot pattern from
+[Goodrich-Lab/BaHZING](https://github.com/Goodrich-Lab/BaHZING).
+
+**One fidelity level, uniformly**: every scenario below - including the
+default hierarchy - uses the same light MCMC settings (`n.chains = 2,
+n.adapt = 60, n.iter.burnin = 2, n.iter.sample = 50`). `n.adapt = 60`
+matches `tests/testthat/test-BaHZING_Model.R`'s own already-vetted choice;
+`n.iter.sample = 50` (vs. that test file's `2`) avoids a near-degenerate
+posterior so the results tables/plots look sensible. This is a demo/showcase
+document meant to be re-knitted often while iterating on formatting, so it
+stays fast throughout rather than embedding a real, many-minute run.
+
+**Every scenario gets both a results table and a plot**, using whichever
+level is the natural analog of "Family" for that hierarchy - not skipped for
+shapes without a literal `"Family"`: the default/reduced-depth/middle-only
+hierarchies all have `Family` directly; the custom-named hierarchy maps
+`Alpha/Bravo/Charlie/Delta/Echo/Foxtrot` position-for-position onto
+`Phylum/Class/Order/Family/Genus/Species`, so `Delta` *is* Family's
+positional equivalent; the minimum-2-level hierarchy has no mid-level at
+all, so it uses `Phylum` (5 taxa - a cleaner plot than Species' 222).
+
+```{r data}
+data("iHMP_Reduced")
+```
+
+`run_scenario()` builds real formatted data and runs the real
+`BaHZING_Model()` with the light settings above - `covar` defaults to
+`"consent_age"` so every scenario uses it automatically; `phyloseq_obj`
+can be overridden for the custom-named scenario, which needs a phyloseq
+object with renamed `tax_table` columns:
+
+```{r run-scenario-helper}
+run_scenario <- function(taxa_levels, covar = "consent_age", phyloseq_obj = iHMP_Reduced,
+                          x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")) {
+  formatted_data <- Format_BaHZING(phyloseq_obj, taxa_levels = taxa_levels)
+  BaHZING_Model(
+    formatted_data = formatted_data,
+    x = x,
+    covar = covar,
+    n.chains = 2, n.adapt = 60, n.iter.burnin = 2, n.iter.sample = 50,
+    seed = 20260728, verbose = FALSE
+  )
+}
+```
+
+`summarize_results()` gives a quick sanity check before showing a preview -
+total row count, how many *distinct* taxa actually appear (`taxa_full`), and
+which level(s) show up in `domain` - cheaper to scan than paging through a
+full table, and immediately reveals e.g. one taxon appearing across multiple
+component/exposure rows vs. genuinely many distinct taxa:
+
+```{r summarize-results-helper}
+summarize_results <- function(result) {
+  cat("Total rows:", nrow(result), "\n")
+  cat("Unique taxa (taxa_full):", length(unique(result$taxa_full)), "\n")
+  cat("Unique domain(s):", paste(unique(result$domain), collapse = ", "), "\n")
+  datatable(head(result, 10), options = list(scrollX = TRUE, dom = "t"))
+}
+```
+
+`plot_domain_results()` is the exact downstream-analysis code from
+`Goodrich-Lab/BaHZING`, generalized only enough to reuse across scenarios
+(the domain to filter to becomes a parameter, substituted into the
+title/axis label) - the filtering/plotting logic itself is unchanged:
+
+```{r plot-domain-helper}
+plot_domain_results <- function(bahzing_resout, domain_name) {
+  count_estimates <- bahzing_resout[bahzing_resout$component == "Count model coefficients", ]
+  domain_res_out <- count_estimates[count_estimates$domain == domain_name, ]
+  domain_res_out$p_Dir_sig <- ifelse(domain_res_out$pdir > 0.975, "pDIR Sig", "pDIR Not Sig")
+
+  ggplot(domain_res_out, aes(x = estimate, y = taxa_name, color = p_Dir_sig)) +
+    geom_point() +
+    geom_errorbar(aes(xmin = bci_lcl, xmax = bci_ucl), width = 0) +
+    geom_vline(xintercept = 0, linetype = 2) +
+    facet_grid(~exposure) +
+    theme_classic() +
+    labs(title = paste0(domain_name, "-level count model results"),
+         x = "Log fold-change", y = domain_name, color = "Probability of Direction")
+}
+```
+
+# Scenarios
+
+## 1. Default 6-level hierarchy
+
+```{r scenario-1}
+result_1 <- run_scenario(default_taxa_levels)
+summarize_results(result_1)
+```
+
+The exact downstream-analysis code as originally given (unmodified, using
+`bahzing_resout`/`family_res_out` literally, not the generalized helper) -
+one section of this document that's precisely the reference pattern, not
+just a generalized version of it:
+
+```{r scenario-1-verbatim}
+bahzing_resout <- result_1
+
+# Summarize the results
+## Lets examine the Count model coefficients
+count_estimates <- bahzing_resout[bahzing_resout$component == "Count model coefficients", ]
+
+# Lets look at only the family level results
+family_res_out <- count_estimates[count_estimates$domain == "Family",]
+
+# Having a probabilty of direction > 0.975 is equivalent to examining
+# whether the 95% BCI is overlapping with 0:
+family_res_out$p_Dir_sig <-  ifelse(family_res_out$pdir > 0.975,
+                                    "pDIR Sig", "pDIR Not Sig")
+
+# Plot the genus results
+ggplot(family_res_out, aes(x = estimate, y = taxa_name, color = p_Dir_sig)) +
+  geom_point() +
+  geom_errorbar(aes(xmin = bci_lcl, xmax = bci_ucl), width = 0) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(~exposure) +
+  theme_classic() +
+  labs(title = "Family-level count model results",
+       x = "Log fold-change",
+       y = "Family",
+       color = "Probability of Direction")
+```
+
+## 2. Reduced-depth hierarchy
+
+`c("Phylum", "Family", "Genus", "Species")`.
+
+```{r scenario-2}
+result_2 <- run_scenario(c("Phylum", "Family", "Genus", "Species"))
+summarize_results(result_2)
+plot_domain_results(result_2, "Family")
+```
+
+## 3. Middle-only hierarchy
+
+`c("Class", "Order", "Family")`. Note the plot uses `"Order"`, not
+`"Family"`: in this hierarchy `Family` is the *narrowest* level - tied 1:1
+to each of the 222 original OTUs (like Species in the default hierarchy),
+so `domain == "Family"` here matches all 222 individual taxa, not a small
+aggregated set. `Order` is the true mid-hierarchy level (has both a parent
+to borrow from and a child that borrows from it) and only has 6 distinct
+values - the correct analog to how `"Family"` behaves in the scenarios
+above.
+
+```{r scenario-3}
+result_3 <- run_scenario(c("Class", "Order", "Family"))
+summarize_results(result_3)
+plot_domain_results(result_3, "Order")
+```
+
+## 4. Custom-named hierarchy
+
+`c("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")` - `Delta` is
+Family's positional equivalent.
+
+```{r scenario-4}
+ps_renamed <- iHMP_Reduced
+tt <- tax_table(ps_renamed)
+colnames(tt) <- c("Domain", "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+tax_table(ps_renamed) <- tt
+
+result_4 <- run_scenario(c("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"),
+                          phyloseq_obj = ps_renamed)
+summarize_results(result_4)
+plot_domain_results(result_4, "Delta")
+```
+
+## 5. Minimum-2-level hierarchy
+
+`c("Phylum", "Species")` - no mid-level exists, so `Phylum` (5 taxa) is used
+instead of `Family`.
+
+```{r scenario-5}
+result_5 <- run_scenario(c("Phylum", "Species"))
+summarize_results(result_5)
+plot_domain_results(result_5, "Phylum")
+```
+
+## 6. Default 6-level hierarchy, single exposure, with covariate
+
+Same `default_taxa_levels` hierarchy as Scenario 1, but with only one
+exposure (`soft_drinks_dietnum`) instead of two, keeping the default
+`consent_age` covariate.
+
+```{r scenario-6}
+result_6 <- run_scenario(default_taxa_levels, x = "soft_drinks_dietnum")
+summarize_results(result_6)
+plot_domain_results(result_6, "Family")
+```
+
+## 7. Default 6-level hierarchy, single exposure, without covariate
+
+Same as Scenario 6, but with `covar = NULL` - no covariates in the model.
+
+```{r scenario-7}
+result_7 <- run_scenario(default_taxa_levels, covar = NULL, x = "soft_drinks_dietnum")
+summarize_results(result_7)
+plot_domain_results(result_7, "Family")
+```

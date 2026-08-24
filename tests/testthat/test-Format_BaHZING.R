@@ -42,6 +42,38 @@ test_that("invalid or unavailable taxa_levels fail clearly", {
   )
 })
 
+test_that("a nonconsecutive four-level hierarchy is formatted generically", {
+  data("iHMP_Reduced")
+
+  custom_levels <- c("Phylum", "Family", "Genus", "Species")
+  formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = custom_levels)
+
+  testthat::expect_equal(length(formatted_data), 6)
+  testthat::expect_equal(formatted_data$taxa_levels, custom_levels)
+  testthat::expect_true(all(c(
+    "Family.Phylum.Matrix",
+    "Genus.Family.Matrix",
+    "Species.Genus.Matrix"
+  ) %in% names(formatted_data)))
+  testthat::expect_false(any(grepl("Class|Order", names(formatted_data))))
+})
+
+test_that("a Kingdom column containing d__ values does not stack prefixes", {
+  data("iHMP_Reduced")
+
+  PS <- iHMP_Reduced
+  tt <- tax_table(PS)
+  colnames(tt)[colnames(tt) == "Domain"] <- "Kingdom"
+  tax_table(PS) <- tt
+
+  formatted_data <- Format_BaHZING(PS)
+
+  testthat::expect_true(all(grepl(
+    "^k__(?!d__)", formatted_data$taxon_columns, perl = TRUE
+  )))
+  testthat::expect_false(any(grepl("^k__d__", formatted_data$taxon_columns)))
+})
+
 
 
 test_that("Error thrown when taxonomic levels are less than 2", {
