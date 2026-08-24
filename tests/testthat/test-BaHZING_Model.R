@@ -129,3 +129,31 @@ test_that("test BaHZING_Model", {
     "counterfactual_profiles must be numeric.")
 
 })
+
+test_that("JAGS model text follows custom taxa_levels", {
+  levels <- c("Phylum", "Class", "Order", "Genus")
+  text <- BaHZING:::.bahzing_build_model_text(levels, has_covar = FALSE)
+
+  testthat::expect_match(text, "for\\(r in 1:R\\)")
+  testthat::expect_match(text, "genus.beta")
+  testthat::expect_match(text, "order.beta")
+  testthat::expect_match(text, "class.beta")
+  testthat::expect_match(text, "phylum.beta")
+  testthat::expect_false(grepl("species.beta", text, fixed = TRUE))
+  testthat::expect_false(grepl("family.beta", text, fixed = TRUE))
+})
+
+test_that("chain controls are validated before model fitting", {
+  testthat::expect_error(
+    BaHZING_Model(list(), x = "x", n.chains = "three"),
+    "n.chains must be a positive integer"
+  )
+  testthat::expect_error(
+    BaHZING_Model(list(), x = "x", seed = 0),
+    "seed must be a positive integer"
+  )
+  testthat::expect_error(
+    BaHZING_Model(list(), x = "x", n.cores = 1.5),
+    "n.cores must be NULL or a positive integer"
+  )
+})

@@ -5,16 +5,25 @@
 \title{Format_BaHZING Function}
 \arguments{
 \item{phyloseq.object}{A phyloseq object.}
+
+\item{taxa_levels}{Character vector naming the taxonomic hierarchy to use,
+ordered broadest to narrowest (e.g. \code{c("Phylum","Class","Order","Family","Genus","Species")},
+the default). These must be column names in \code{phyloseq.object}'s \code{tax_table}
+(aside from the narrowest level, which is created automatically if absent).
+Override this for a dataset with a different taxonomic depth or naming
+convention (e.g. a 4-level 16S scheme) - the hierarchical matrices and
+downstream model in \code{BaHZING_Model()} adapt to whatever is supplied here.
+The default reproduces BaHZING's original fixed 6-level hierarchy exactly.}
 }
 \value{
 A list with the following elements:
 \itemize{
 \item \code{Table}: Formatted microbiome data as a data frame.
-\item \code{Species.Genus.Matrix}: Data frame for species-genus relationships (optional).
-\item \code{Genus.Family.Matrix}: Data frame for genus-family relationships (optional).
-\item \code{Family.Order.Matrix}: Data frame for family-order relationships (optional).
-\item \code{Order.Class.Matrix}: Data frame for order-class relationships (optional).
-\item \code{Class.Phylum.Matrix}: Data frame for class-phylum relationships (optional).
+\item \code{taxa_levels}: the taxonomic hierarchy used (echoes the \code{taxa_levels} argument).
+\item \code{taxon_columns}: names of the outcome columns in \code{Table}.
+\item One binary incidence matrix per adjacent pair of levels, named
+\code{"<narrower>.<broader>.Matrix"} (e.g. \code{Species.Genus.Matrix},
+\code{Genus.Family.Matrix}, ... for the default hierarchy).
 }
 }
 \description{
@@ -30,17 +39,11 @@ taxonomic prefixes (e.g., "d__" for Kingdom), unites taxonomic levels, and creat
 matrices based on taxonomic information. The formatted data is then returned as a list
 containing different data frames for further analysis.
 
-The package relies on the \code{phyloseq}, \code{dplyr}, and \code{stringr} packages for data manipulation,
-and also uses functions from \code{tidyr} to unite taxonomic levels.
+The package relies on the \code{phyloseq}, \code{dplyr}, and \code{stringr} packages for data manipulation.
 
 The main function \code{Format_BaHZING} is exported and can be accessed by other packages or scripts
 that depend on the functionalities provided by this package.
 
-The column names 'Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', and 'Species'
-in the tax_table of the phyloseq object should be user-defined and assigned in this function.
-The function will use these column names to perform various operations.
-}
-\note{
-The column names 'Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', and 'Species' in the
-tax_table are expected to be user-defined and assigned within the function.
+The column names 'Kingdom' (or 'Domain') plus whatever is passed
+in \code{taxa_levels} should be present in the tax_table of the phyloseq object.
 }

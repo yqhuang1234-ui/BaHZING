@@ -4,9 +4,42 @@ test_that("test Format_BaHZING", {
   # Format microbiome data
   formatted_data <- Format_BaHZING(iHMP_Reduced)
   # Test format data
-  testthat::expect_equal(object = length(formatted_data), expected = 6)
+  testthat::expect_equal(object = length(formatted_data), expected = 8)
   testthat::expect_true(is.list(formatted_data))
   testthat::expect_true("Table" %in% names(formatted_data))
+  testthat::expect_equal(formatted_data$taxa_levels,
+                         c("Phylum", "Class", "Order", "Family", "Genus", "Species"))
+  testthat::expect_equal(length(formatted_data$taxon_columns),
+                         ncol(formatted_data$Table[[1]]) -
+                           ncol(data.frame(phyloseq::sample_data(iHMP_Reduced))))
+})
+
+test_that("custom taxa_levels drive hierarchy matrices", {
+  data("iHMP_Reduced")
+
+  levels <- c("Phylum", "Class", "Order", "Genus")
+  formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = levels)
+
+  testthat::expect_equal(formatted_data$taxa_levels, levels)
+  testthat::expect_true(all(c(
+    "Class.Phylum.Matrix",
+    "Order.Class.Matrix",
+    "Genus.Order.Matrix"
+  ) %in% names(formatted_data)))
+  testthat::expect_false("Species.Genus.Matrix" %in% names(formatted_data))
+})
+
+test_that("invalid or unavailable taxa_levels fail clearly", {
+  data("iHMP_Reduced")
+
+  testthat::expect_error(
+    Format_BaHZING(iHMP_Reduced, taxa_levels = c("Phylum", "Family", "Foo")),
+    "distinct first letters"
+  )
+  testthat::expect_error(
+    Format_BaHZING(iHMP_Reduced, taxa_levels = c("Phylum", "Cohort", "Species")),
+    "missing required taxa_levels: Cohort"
+  )
 })
 
 
@@ -45,4 +78,3 @@ test_that("If species level not present, create species column", {
   testthat::expect_true(grepl("s__unclassified",
                               colnames(taxa_table_result)[ncol(taxa_table_result)-20]))
 })
-

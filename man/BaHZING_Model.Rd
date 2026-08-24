@@ -53,8 +53,22 @@ check.}
 \item{return_all_estimates}{If FALSE (default), results do not include
 the dispersion and omega estimates from the BaHZING model.}
 
+\item{seed}{Optional positive integer used to generate reproducible,
+distinct JAGS RNG initial values for each chain.}
+
+\item{parallel}{Logical; if TRUE, chains can be run in parallel with
+\code{parallel::mclapply()} on supported non-Windows platforms. Windows uses
+sequential chains.}
+
+\item{n.cores}{Number of cores to use when parallel is TRUE. If NULL,
+physical cores are detected automatically. The value is capped at
+\code{n.chains}.}
+
 \item{ROPE_range}{Region of practical equivalence (ROPE) for calculating
 p_rope. Default is c(-0.1, 0.1).}
+
+\item{return_posterior}{If TRUE, the full posterior MCMC samples are
+returned alongside the results data frame. Default is FALSE.}
 }
 \value{
 A data frame containing results of the Bayesian analysis, with the

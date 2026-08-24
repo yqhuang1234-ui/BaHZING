@@ -10,6 +10,7 @@
 #' @importFrom utils globalVariables
 #' @importFrom stats quantile update
 #' @importFrom bayestestR p_direction p_rope p_map
+#' @importFrom glue glue
 #' @param formatted_data An object containing formatted microbiome data.
 #' @param x A vector of column names of the exposures.
 #' @param covar An optional vector of the column names of covariates.
@@ -46,8 +47,18 @@
 #' check.
 #' @param return_all_estimates If FALSE (default), results do not include
 #' the dispersion and omega estimates from the BaHZING model.
+#' @param seed Optional positive integer used to generate reproducible,
+#' distinct JAGS RNG initial values for each chain.
+#' @param parallel Logical; if TRUE, chains can be run in parallel with
+#' `parallel::mclapply()` on supported non-Windows platforms. Windows uses
+#' sequential chains.
+#' @param n.cores Number of cores to use when parallel is TRUE. If NULL,
+#' physical cores are detected automatically. The value is capped at
+#' `n.chains`.
 #' @param ROPE_range Region of practical equivalence (ROPE) for calculating
 #' p_rope. Default is c(-0.1, 0.1).
+#' @param return_posterior If TRUE, the full posterior MCMC samples are
+#' returned alongside the results data frame. Default is FALSE.
 #' @return A data frame containing results of the Bayesian analysis, with the
 #' following columns:
 #' - taxa_full: Full Taxa information, including all levels of the taxonomy.
@@ -91,41 +102,69 @@ globalVariables(c("X2.5.", "X97.5.", "Mean",
                   "name"))
 
 # JAGS model text generators -------------------------------------------------
-# The six taxonomic levels (species -> genus -> family -> order -> class ->
-# phylum) share one recurring pattern: each level's exposure effect is drawn
-# from a normal distribution centered on its parent level's corresponding
-# effect (Equation 6), with species (the base/likelihood level) and phylum
-# (the top, with no parent to borrow from) as the two special cases. These
-# generators replace what used to be ~180 lines of hand-maintained, near-
-# identical literal JAGS text per model variant (with/without covariates).
+# BaHZING's hierarchical shrinkage model has one recurring pattern: every
+# taxonomic level's exposure effect is drawn from a normal distribution
+# centered on its parent level's corresponding effect, borrowed via a binary
+# taxonomy indicator matrix (inprod against e.g. GenusData). The narrowest
+# level in taxa_levels (species, by default) is the one exception with a
+# parent to borrow from AND its own data likelihood; the broadest level
+# (phylum, by default) is the other exception, with no parent to borrow from
+# at all. These generators build the JAGS text for an arbitrary-length
+# taxa_levels hierarchy from these three roles (narrowest/data-likelihood,
+# mid-hierarchy, broadest/terminal), replacing what used to be two ~180-line
+# hand-maintained, near-identical literal JAGS strings (one per
+# with/without-covariates variant) that assumed exactly 6 fixed level names.
 #
-# All five generators below use glue::glue(.open="<<", .close=">>", .trim=FALSE):
-# custom delimiters because JAGS's own "{ }" block syntax would otherwise
-# collide with glue's default interpolation markers, and .trim=FALSE because
-# glue's default (.trim=TRUE) strips leading whitespace and the trailing
-# newline from its result - harmless for a block that ends the whole
-# template, but it silently glues adjacent fragments onto the same line
-# wherever one block's output is spliced into another (found the hard way:
-# a comment ended up concatenated onto the same line as the code after it).
+# All generators use glue::glue(.open="<<", .close=">>", .trim=FALSE): custom
+# delimiters because JAGS's own "{ }" block syntax would otherwise collide
+# with glue's default interpolation markers, and .trim=FALSE because glue's
+# default (.trim=TRUE) strips leading whitespace and the trailing newline -
+# harmless for a block that ends the whole template, but it silently glues
+# adjacent fragments onto the same line wherever one block's output is
+# spliced into another.
+
+#' Derive the standard JAGS identifier names for one taxa_levels position
+#'
+#' Single source of truth for the level-name -> JAGS-identifier convention
+#' used throughout this file (mirrors `hierarchy_matrix_name()`'s role for
+#' the incidence-matrix naming convention in `taxa_levels.R`): a level's
+#' lowercase variable-name prefix, its proper-case label (for comments/
+#' taxon-count scalar names), its loop index variable, its taxon-count
+#' scalar name, and its incidence-matrix data variable name.
+#'
+#' @param taxa_levels Character vector, broadest to narrowest.
+#' @param i Integer position to look up.
+#' @return A list with elements `level` (lowercase prefix, e.g. `"genus"`),
+#'   `label` (proper case, e.g. `"Genus"`), `idx` (loop index variable, e.g.
+#'   `"g.r"`), `R` (taxon-count scalar name, e.g. `"Genus.R"`), and `data`
+#'   (incidence-matrix variable name, e.g. `"GenusData"`).
+#' @keywords internal
+#' @noRd
+.bahzing_level_vars <- function(taxa_levels, i) {
+  label <- taxa_level_name(taxa_levels, i)
+  level <- tolower(label)
+  list(
+    level = level,
+    label = label,
+    idx   = paste0(substr(level, 1, 1), ".r"),
+    R     = paste0(label, ".R"),
+    data  = paste0(label, "Data")
+  )
+}
 
 #' Build the precision-prior and g-estimation lines for one taxonomic level
 #'
-#' Generates the JAGS lines shared byte-for-byte by all six taxonomic levels:
-#' the precision priors for both the count-model and zero-inflation dispersion
-#' (`<level>.tau`/`<level>.sigma`, count and zero-inflation), followed by the
-#' g-estimation block that computes each level's mixture contrast
-#' (`<level>.psi`) from the low/high counterfactual `profiles` (Equation 7).
-#' Used by every level via [.bahzing_level_block()] and directly by
-#' [.bahzing_species_block()].
+#' Generates the JAGS lines for one level's precision priors (count-model and
+#' zero-inflation dispersion) and its g-estimation block (the mixture
+#' contrast computed from the low/high counterfactual `profiles`). Shared by
+#' every level via `.bahzing_level_block()` and `.bahzing_narrowest_level_block()`.
 #'
-#' @param level Character. The level's variable-name prefix, e.g. `"genus"`,
-#'   `"species"`. Used both for the `<level>.tau`/`<level>.sigma` precision
-#'   nodes and the `<level>.psi`/`<level>.eta.*` g-estimation nodes.
+#' @param level Character. The level's variable-name prefix, e.g. `"genus"`.
+#'   Used for the g-estimation nodes (`<level>.psi`, `<level>.eta.*`), which
+#'   are always named after the level itself.
 #' @param idx Character. The JAGS loop index variable for this level, e.g.
-#'   `"g.r"` for genus, `"r"` for species.
-#' @return A length-1 character string: the JAGS text for this block,
-#'   ending in a trailing newline so it composes cleanly with adjacent
-#'   fragments.
+#'   `"g.r"`.
+#' @return A length-1 character string ending in a trailing newline.
 #' @keywords internal
 #' @noRd
 .bahzing_precision_gestimation_block <- function(level, idx) {
@@ -141,7 +180,7 @@ globalVariables(c("X2.5.", "X97.5.", "Mean",
       <<level>>.eta.low[<<idx>>] <- inprod(<<level>>.beta[<<idx>>,1:P], profiles[1,1:P])
       <<level>>.eta.high[<<idx>>] <- inprod(<<level>>.beta[<<idx>>,1:P], profiles[2,1:P])
       <<level>>.psi[<<idx>>] <- <<level>>.eta.high[<<idx>>]-<<level>>.eta.low[<<idx>>]
-      #zero inflation
+      # zero-inflation
       <<level>>.eta.low.zero[<<idx>>] <- inprod(<<level>>.beta.zero[<<idx>>,1:P], profiles[1,1:P])
       <<level>>.eta.high.zero[<<idx>>] <- inprod(<<level>>.beta.zero[<<idx>>,1:P], profiles[2,1:P])
       <<level>>.psi.zero[<<idx>>] <- <<level>>.eta.high.zero[<<idx>>]-<<level>>.eta.low.zero[<<idx>>]
@@ -153,145 +192,148 @@ globalVariables(c("X2.5.", "X97.5.", "Mean",
 #' Generates `for(p in 1:P) { <level>.beta[idx,p] ~ dnorm(...) }`: each
 #' level's exposure effect is drawn from a normal distribution centered on a
 #' value borrowed from the parent level, computed via `inprod()` over the
-#' parent's beta and the taxonomy indicator matrix (Equation 6) - both the
-#' count-model and zero-inflation components. If `parent` is `NULL` (only
-#' phylum, the top of the hierarchy), there's nothing to borrow from, so the
+#' parent's beta and the taxonomy indicator matrix - both the count-model and
+#' zero-inflation components. If `parent` is `NULL` (only the broadest/
+#' terminal level, phylum by default), there's nothing to borrow from, so the
 #' prior falls back to a fixed `dnorm(0, tau)` instead.
 #'
-#' Shared by every level including species, via [.bahzing_level_block()] and
-#' [.bahzing_species_block()] respectively - see `mu_owner` below for why
-#' species needs one extra parameter to reuse this.
+#' Shared by every level including the narrowest level, via
+#' `.bahzing_level_block()` and `.bahzing_narrowest_level_block()`
+#' respectively - both the borrowed-mean node name (`mu.<parent>`) and the
+#' precision-node prefix (`<level>.tau`/`<level>.sigma`) now follow the same
+#' convention for every level with no per-role override, unlike BaHZING's
+#' original hand-written model (which named the narrowest level's precision
+#' nodes bare `tau`/`sigma` and its borrowed-mean node `mu.species` instead
+#' of `mu.genus`) - safe to make consistent since none of `tau`/`sigma`/
+#' `mu.*` are ever monitored/extracted nodes.
 #'
-#' @param level Character. This level's variable-name prefix (e.g. `"genus"`,
-#'   `"species"`), used for `<level>.beta`/`<level>.tau`.
-#' @param idx Character. This level's JAGS loop index variable (e.g. `"g.r"`,
-#'   `"r"`).
+#' @param level Character. This level's variable-name prefix (e.g.
+#'   `"genus"`), used for `<level>.beta`/`<level>.tau`.
+#' @param idx Character. This level's JAGS loop index variable (e.g.
+#'   `"g.r"`).
 #' @param parent Character or `NULL`. The parent level's variable-name prefix
 #'   to borrow the prior mean from (e.g. `"family"` for genus). `NULL` only
-#'   for phylum, which has no parent.
+#'   for the broadest/terminal level, which has no parent.
 #' @param parent_R Character or `NULL`. The JAGS scalar holding the parent
 #'   level's taxon count (e.g. `"Family.R"`), used to size the `inprod()`.
 #'   Required whenever `parent` is supplied.
 #' @param parent_data Character or `NULL`. The taxonomy indicator matrix
 #'   linking this level's taxa to the parent's (e.g. `"FamilyData"`).
 #'   Required whenever `parent` is supplied.
-#' @param mu_owner Character. Whose name labels the intermediate "borrowed
-#'   mean" node (`mu.<mu_owner>`). Defaults to `parent`, matching the
-#'   original model's convention for genus/family/order/class (e.g. genus's
-#'   node is `mu.family`, named after *its* parent). Species is the one
-#'   exception in the original model - its node is `mu.species` (named after
-#'   *itself*, not `mu.genus`) - so [.bahzing_species_block()] overrides this
-#'   explicitly to `"species"`. This is a naming inconsistency inherited from
-#'   the original model, preserved rather than "fixed", since `mu.*` is never
-#'   an monitored/extracted node - only its label differs, not the value.
-#' @param comment Character or `NULL`. If supplied, prepended as a standalone
-#'   comment line above the `for(p in 1:P)` loop (species has one in the
-#'   original, `"prior on exposure effects"`; genus/family/order/class/phylum
-#'   don't have one at all).
 #' @return A length-1 character string ending in a trailing newline.
 #' @keywords internal
 #' @noRd
 .bahzing_exposure_prior_block <- function(level, idx, parent = NULL, parent_R = NULL,
-                                            parent_data = NULL, mu_owner = parent,
-                                            comment = NULL) {
-  # plain paste0, not glue - glue's default .trim strips leading whitespace
-  # and the trailing newline, which would collapse this onto the same line
-  # as whatever follows it.
-  comment_line <- if (!is.null(comment)) paste0("      # ", comment, "\n") else ""
+                                            parent_data = NULL) {
+  tau_prefix <- paste0(level, ".")
   body <- if (!is.null(parent)) {
     glue::glue(
-"        <<level>>.beta[<<idx>>,p] ~ dnorm(mu.<<mu_owner>>[<<idx>>,p],<<level>>.tau[<<idx>>])
-        mu.<<mu_owner>>[<<idx>>,p] <- inprod(<<parent>>.beta[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
+"        <<level>>.beta[<<idx>>,p] ~ dnorm(mu.<<parent>>[<<idx>>,p], <<tau_prefix>>tau[<<idx>>])
+        mu.<<parent>>[<<idx>>,p] <- inprod(<<parent>>.beta[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
         #Zero inflation component
-        <<level>>.beta.zero[<<idx>>,p] ~ dnorm(mu.<<mu_owner>>.zero[<<idx>>,p],<<level>>.tau.zero[<<idx>>])
-        mu.<<mu_owner>>.zero[<<idx>>,p] <- inprod(<<parent>>.beta.zero[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
+        <<level>>.beta.zero[<<idx>>,p] ~ dnorm(mu.<<parent>>.zero[<<idx>>,p], <<tau_prefix>>tau.zero[<<idx>>])
+        mu.<<parent>>.zero[<<idx>>,p] <- inprod(<<parent>>.beta.zero[1:<<parent_R>>,p], <<parent_data>>[<<idx>>,1:<<parent_R>>])
 ", .open = "<<", .close = ">>", .trim = FALSE)
   } else {
     glue::glue(
-"        <<level>>.beta[<<idx>>,p] ~ dnorm(0, <<level>>.tau[<<idx>>])
+"        <<level>>.beta[<<idx>>,p] ~ dnorm(0, <<tau_prefix>>tau[<<idx>>])
         #Zero inflation component
-        <<level>>.beta.zero[<<idx>>,p] ~ dnorm(0, <<level>>.tau.zero[<<idx>>])
+        <<level>>.beta.zero[<<idx>>,p] ~ dnorm(0, <<tau_prefix>>tau.zero[<<idx>>])
 ", .open = "<<", .close = ">>", .trim = FALSE)
   }
   glue::glue(
-"<<comment_line>>      for(p in 1:P) {
+"      for(p in 1:P) {
 <<body>>      }
 ", .open = "<<", .close = ">>", .trim = FALSE)
 }
 
-#' Build one taxonomic level's full JAGS block (genus/family/order/class/phylum)
+#' Build one mid-hierarchy or broadest/terminal level's full JAGS block
 #'
-#' Assembles one level's complete `for(idx in 1:level_R) { ... }` block:
-#' a comment header, the exposure-effect prior
-#' ([.bahzing_exposure_prior_block()]), and the precision-prior/g-estimation
-#' lines ([.bahzing_precision_gestimation_block()]). Handles both
-#' genus/family/order/class (`parent` supplied - borrows its prior mean from
-#' the parent level) and phylum (`parent = NULL` - the top of the hierarchy,
-#' with nothing to borrow from). These two cases used to be separate
-#' near-duplicate functions (`.bahzing_mid_level_block()` /
-#' `.bahzing_top_level_block()`) before being unified here.
+#' Assembles one level's complete `for(idx in 1:level_R) { ... }` block: a
+#' comment header, the exposure-effect prior
+#' (`.bahzing_exposure_prior_block()`), and the precision-prior/g-estimation
+#' lines (`.bahzing_precision_gestimation_block()`). Handles both mid-
+#' hierarchy levels (`i > 1` - borrows its prior mean from the parent level
+#' at `i - 1`) and the broadest/terminal level (`i == 1` - the top of the
+#' hierarchy, with nothing to borrow from).
 #'
-#' Not used for species - species has its own likelihood/dispersion/
-#' intercept/covariate structure with no equivalent at any other level, so it
-#' gets its own function, [.bahzing_species_block()], which reuses the same
-#' two shared sub-block generators this function uses.
+#' This level's and its parent's JAGS identifiers (variable-name prefix,
+#' loop index, taxon-count scalar, incidence-matrix name) are derived
+#' automatically from `taxa_levels` and `i` via `.bahzing_level_vars()` -
+#' callers only need to supply the hierarchy and a position.
 #'
-#' @param level Character. This level's variable-name prefix, e.g. `"genus"`.
-#' @param level_label Character. Human-readable label for this level's
-#'   comment header, e.g. `"Genus"` (produces `# Genus level`).
-#' @param idx Character. This level's JAGS loop index variable, e.g. `"g.r"`.
-#' @param level_R Character. The JAGS scalar holding this level's taxon
-#'   count, e.g. `"Genus.R"` - bounds the `for(idx in 1:level_R)` loop.
-#' @param parent Character or `NULL`. The parent level's variable-name prefix
-#'   (e.g. `"family"` for genus). `NULL` only for phylum.
-#' @param parent_R Character or `NULL`. The parent level's taxon-count
-#'   scalar (e.g. `"Family.R"`). Required whenever `parent` is supplied.
-#' @param parent_data Character or `NULL`. The taxonomy indicator matrix
-#'   linking this level to the parent (e.g. `"FamilyData"`). Required
-#'   whenever `parent` is supplied.
+#' Not used for the narrowest level - that level has its own
+#' likelihood/dispersion/intercept/covariate structure with no equivalent at
+#' any other level, so it gets its own function,
+#' `.bahzing_narrowest_level_block()`, which reuses the same two shared
+#' sub-block generators this function uses.
+#'
+#' @param taxa_levels Character vector naming the taxonomic hierarchy,
+#'   ordered broadest to narrowest.
+#' @param i Integer position of this level in `taxa_levels`.
 #' @return A length-1 character string: this level's complete JAGS block.
 #' @keywords internal
 #' @noRd
-.bahzing_level_block <- function(level, level_label, idx, level_R,
-                                  parent = NULL, parent_R = NULL, parent_data = NULL) {
-  exposure_prior  <- .bahzing_exposure_prior_block(level, idx, parent, parent_R, parent_data)
-  precision_gestim <- .bahzing_precision_gestimation_block(level, idx)
+.bahzing_level_block <- function(taxa_levels, i) {
+  cur    <- .bahzing_level_vars(taxa_levels, i)
+  parent <- if (i > 1) .bahzing_level_vars(taxa_levels, i - 1) else NULL
+
+  exposure_prior   <- .bahzing_exposure_prior_block(cur$level, cur$idx,
+                        parent$level, parent$R, parent$data)
+  precision_gestim <- .bahzing_precision_gestimation_block(cur$level, cur$idx)
 
   glue::glue(
-"    # <<level_label>> level
-    for(<<idx>> in 1:<<level_R>>) {
+"    # <<cur$label>> level
+    for(<<cur$idx>> in 1:<<cur$R>>) {
 <<exposure_prior>><<precision_gestim>>    }
 
 ", .open = "<<", .close = ">>", .trim = FALSE)
 }
 
-#' Build the species-level JAGS block - the base/likelihood level
+#' Build the narrowest level's JAGS block - the data-likelihood level
 #'
-#' Species is the one level tied directly to the observed data, so unlike
-#' [.bahzing_level_block()] (genus/family/order/class/phylum, which are pure
-#' prior/hierarchy blocks), this one also includes: the zero-inflated
-#' negative binomial likelihood (`Y ~ dnegbin(...)`, `zero ~ dbern(...)`),
-#' the dispersion prior (`disp`), the intercept priors (`alpha`/
-#' `alpha.zero`), and - when `has_covar` is `TRUE` - the covariate terms and
-#' their priors (`delta`/`delta.zero`). This is what collapses the original
-#' model's separate with/without-covariates literal text into one function.
+#' The narrowest level in `taxa_levels` is tied directly to the observed
+#' data, so unlike `.bahzing_level_block()` (mid-hierarchy/terminal levels,
+#' which are pure prior/hierarchy blocks), this one also includes: the
+#' zero-inflated negative binomial likelihood (`Y ~ dnegbin(...)`,
+#' `zero ~ dbern(...)`), the dispersion prior (`disp`), the intercept priors
+#' (`alpha`/`alpha.zero`), and - when `has_covar` is `TRUE` - the covariate
+#' terms and their priors (`delta`/`delta.zero`). This is what collapses the
+#' original model's separate with/without-covariates literal text into one
+#' function.
 #'
-#' Reuses the same two shared sub-block generators every other level uses:
-#' [.bahzing_exposure_prior_block()] (with `mu_owner = "species"` and
-#' `comment = "prior on exposure effects"`, matching the original model's
-#' species-specific naming/comment conventions) and
-#' [.bahzing_precision_gestimation_block()].
+#' As with `.bahzing_level_block()`, this level's and its parent's JAGS
+#' identifiers are derived automatically from `taxa_levels` and `i` via
+#' `.bahzing_level_vars()` - the parent is always `i - 1` (`n >= 2` is
+#' enforced by `validate_taxa_levels()`, so a parent always exists here).
 #'
+#' Reuses the same two shared sub-block generators every other level uses,
+#' called exactly the same way as `.bahzing_level_block()` calls them - this
+#' level's borrowed-mean and precision-node naming now follows the same
+#' convention as every other level (see `.bahzing_exposure_prior_block()`'s
+#' docs for why that's safe, a deliberate departure from BaHZING's original
+#' hand-written model's species-specific naming).
+#'
+#' @param taxa_levels Character vector naming the taxonomic hierarchy,
+#'   ordered broadest to narrowest.
+#' @param i Integer position of the narrowest level in `taxa_levels` (i.e.
+#'   `length(taxa_levels)`).
 #' @param has_covar Logical. Whether covariates are included in the model.
 #'   When `TRUE`, adds the `delta`/`delta.zero` covariate terms to the
 #'   likelihood and their `dnorm(0, 1.0E-02)` priors; when `FALSE`, omits
 #'   them entirely (matching the original model's with/without-covariates
-#'   variants).
-#' @return A length-1 character string: the complete species-level JAGS
-#'   block.
+#'   variants). Confirmed by diffing the two original literal model strings:
+#'   covariate terms only ever appear in this block - every other level's
+#'   text is identical between the with/without-covariates variants.
+#' @return A length-1 character string: the complete data-likelihood-level
+#'   JAGS block.
 #' @keywords internal
 #' @noRd
-.bahzing_species_block <- function(has_covar) {
+.bahzing_narrowest_level_block <- function(taxa_levels, i, has_covar) {
+  cur    <- .bahzing_level_vars(taxa_levels, i)
+  parent <- .bahzing_level_vars(taxa_levels, i - 1)
+  level  <- cur$level
+
   covar_lambda <- if (has_covar) " + inprod(delta[r, 1:Q], W[i,1:Q])" else ""
   covar_pi     <- if (has_covar) " + inprod(delta.zero[r, 1:Q], W[i,1:Q])" else ""
   covar_prior  <- if (has_covar)
@@ -303,22 +345,20 @@ globalVariables(c("X2.5.", "X97.5.", "Mean",
       }
 " else ""
 
-  exposure_prior <- .bahzing_exposure_prior_block("species", "r", parent = "genus",
-                                                    parent_R = "Genus.R", parent_data = "GenusData",
-                                                    mu_owner = "species",
-                                                    comment = "prior on exposure effects")
-  precision_gestim <- .bahzing_precision_gestimation_block("species", "r")
+  exposure_prior <- .bahzing_exposure_prior_block(level, "r", parent = parent$level,
+                                                    parent_R = parent$R, parent_data = parent$data)
+  precision_gestim <- .bahzing_precision_gestimation_block(level, "r")
 
   glue::glue(
 "    for(r in 1:R) {
       for(i in 1:N) {
         Y[i,r] ~ dnegbin(mu[i,r], disp[r])
         mu[i,r] <- disp[r]/(disp[r]+(1-zero[i,r])*lambda[i,r]) - 0.000001*zero[i,r]
-        log(lambda[i,r]) <- alpha[r] + inprod(species.beta[r,1:P], X.q[i,1:P])<<covar_lambda>>
+        log(lambda[i,r]) <- alpha[r] + inprod(<<level>>.beta[r,1:P], X.q[i,1:P])<<covar_lambda>>
 
         # zero-inflation
         zero[i,r] ~ dbern(pi[i,r])
-        logit(pi[i,r]) <- alpha.zero[r] + inprod(species.beta.zero[r,1:P], X.q[i,1:P])<<covar_pi>>
+        logit(pi[i,r]) <- alpha.zero[r] + inprod(<<level>>.beta.zero[r,1:P], X.q[i,1:P])<<covar_pi>>
       }
       # prior on dispersion parameter
       disp[r] ~ dunif(0,50)
@@ -335,30 +375,44 @@ globalVariables(c("X2.5.", "X97.5.", "Mean",
 
 #' Assemble the complete JAGS model text for BaHZING_Model()
 #'
-#' The top-level entry point for the templating system: builds all six
-#' taxonomic-level blocks (species via [.bahzing_species_block()]; genus,
-#' family, order, class, and phylum via [.bahzing_level_block()], each
-#' passed its own parent level's info) and concatenates them into one
-#' complete `model { ... }` string, ready to pass to
-#' `jags.model(file = textConnection(...))`. Called once per
-#' `BaHZING_Model()` invocation as
-#' `.bahzing_build_model_text(has_covar = !is.null(covar))`.
+#' The top-level entry point for the templating system: builds every
+#' taxonomic level's block (the narrowest level via
+#' `.bahzing_narrowest_level_block()`; every other level via
+#' `.bahzing_level_block()`, each simply passed `taxa_levels` and its own
+#' position - parent resolution happens automatically inside those
+#' functions) and concatenates them narrowest-to-broadest into one complete
+#' `model { ... }` string, matching the original hand-written text's
+#' declaration order, ready to pass to `jags.model(file = textConnection(...))`.
 #'
+#' @param taxa_levels Character vector naming the taxonomic hierarchy,
+#'   ordered broadest to narrowest (e.g. `default_taxa_levels`). Must have
+#'   already been validated with `validate_taxa_levels()`.
 #' @param has_covar Logical. Whether the model includes covariates - passed
-#'   straight through to [.bahzing_species_block()], the only level that
-#'   varies its text based on this (see that function for why).
+#'   straight through to `.bahzing_narrowest_level_block()`, the only level
+#'   that varies its text based on this (see that function for why).
 #' @return A length-1 character string: the complete JAGS model text, from
 #'   `model {` through the final closing `}`.
 #' @keywords internal
 #' @noRd
-.bahzing_build_model_text <- function(has_covar) {
-  species <- .bahzing_species_block(has_covar)
-  genus   <- .bahzing_level_block("genus",  "Genus",  "g.r", "Genus.R",  "family", "Family.R", "FamilyData")
-  family  <- .bahzing_level_block("family", "Family", "f.r", "Family.R", "order",  "Order.R",  "OrderData")
-  order   <- .bahzing_level_block("order",  "Order",  "o.r", "Order.R",  "class",  "Class.R",  "ClassData")
-  class   <- .bahzing_level_block("class",  "Class",  "c.r", "Class.R",  "phylum", "Phylum.R", "PhylumData")
-  phylum  <- .bahzing_level_block("phylum", "Phylum", "p.r", "Phylum.R")
-  paste0("model {\n", species, genus, family, order, class, phylum, "  }")
+.bahzing_build_model_text <- function(taxa_levels, has_covar) {
+  n <- length(taxa_levels)
+  blocks <- vector("list", n)
+  for (i in seq_len(n)) {
+    blocks[[i]] <- if (i == n) {
+      # Narrowest level: the data-likelihood role. Always has a parent
+      # (n >= 2 is enforced by validate_taxa_levels()).
+      .bahzing_narrowest_level_block(taxa_levels, i, has_covar)
+    } else {
+      .bahzing_level_block(taxa_levels, i)
+    }
+  }
+  # Emit narrowest -> broadest (reverse of taxa_levels' broadest-first
+  # storage order) to match the original text's declaration order. JAGS
+  # registers stochastic nodes in declaration order, which can affect the
+  # sampler's RNG draw sequence for a given seed even when the model is
+  # mathematically equivalent - preserving order keeps a seeded before/after
+  # diff exactly reproducible rather than merely statistically similar.
+  paste0("model {\n", paste(rev(blocks), collapse = ""), "  }")
 }
 
 BaHZING_Model <- function(formatted_data,
@@ -373,19 +427,27 @@ BaHZING_Model <- function(formatted_data,
                           q = NULL,
                           verbose = TRUE,
                           return_all_estimates = FALSE,
-                          ROPE_range = c(-0.1, 0.1),
                           seed = NULL,
+                          parallel = FALSE,
+                          n.cores = NULL,
+                          ROPE_range = c(-0.1, 0.1),
                           return_posterior = FALSE) {
 
-  # JAGS has its own RNG, independent of R's - set.seed() alone has no effect
-  # on it. Reproducible runs require explicit .RNG.name/.RNG.seed per chain
-  # passed as `inits` to jags.model().
-  jags_inits <- if (!is.null(seed)) {
-    lapply(seq_len(n.chains), function(i) {
-      list(.RNG.name = "base::Wichmann-Hill", .RNG.seed = seed + i)
-    })
-  } else {
-    NULL
+  if (!is.numeric(n.chains) || length(n.chains) != 1L || is.na(n.chains) ||
+      !is.finite(n.chains) || n.chains < 1 || n.chains != floor(n.chains)) {
+    stop("n.chains must be a positive integer.")
+  }
+  n.chains <- as.integer(n.chains)
+  if (!is.null(seed) &&
+      (!is.numeric(seed) || length(seed) != 1L || is.na(seed) ||
+       !is.finite(seed) || seed < 1 || seed != floor(seed) ||
+       seed > .Machine$integer.max - n.chains)) {
+    stop("seed must be a positive integer small enough to create one seed per chain.")
+  }
+  if (!is.null(n.cores) &&
+      (!is.numeric(n.cores) || length(n.cores) != 1L || is.na(n.cores) ||
+       !is.finite(n.cores) || n.cores < 1 || n.cores != floor(n.cores))) {
+    stop("n.cores must be NULL or a positive integer.")
   }
 
   # 1. Check input data ----
@@ -466,6 +528,26 @@ BaHZING_Model <- function(formatted_data,
                       rep(counterfactual_profiles[2], P))
   }
 
+  chain_inits <- if (!is.null(seed)) {
+    lapply(seq_len(n.chains), function(i) {
+      list(.RNG.name = "base::Wichmann-Hill",
+           .RNG.seed = seed + i)
+    })
+  } else {
+    NULL
+  }
+
+  if (isTRUE(parallel) && is.null(n.cores)) {
+    detected_cores <- parallel::detectCores(logical = FALSE)
+    if (is.na(detected_cores) || detected_cores < 1) {
+      detected_cores <- 1
+    }
+    n.cores <- max(1, min(n.chains, detected_cores))
+  }
+  if (!is.null(n.cores)) {
+    n.cores <- min(n.chains, as.integer(n.cores))
+  }
+
   # Give warning if using quantiles but counterfactuals < 0
   if(exposure_standardization=="quantile" &
      any(counterfactual_profiles<0 |
@@ -499,32 +581,43 @@ BaHZING_Model <- function(formatted_data,
   }
 
   # 4. Format microbiome matricies ----
+  taxa_levels <- formatted_data$taxa_levels
+  if (is.null(taxa_levels)) {
+    stop("formatted_data has no $taxa_levels; regenerate it with the current Format_BaHZING().")
+  }
+  validate_taxa_levels(taxa_levels)
+  narrowest_level <- taxa_level_name(taxa_levels, length(taxa_levels))
+
+  # Which columns of exposure_covar_dat are taxon-count (outcome) data,
+  # read directly from Format_BaHZING()'s own authoritative record rather
+  # than inferred via string-matching (e.g. assuming every such column
+  # contains "k__", which silently breaks if Kingdom/Domain isn't part of
+  # the input taxonomy at all - Format_BaHZING() already computes this
+  # exact list when it builds these columns, so there's no need to guess).
+  taxon_columns <- formatted_data$taxon_columns
+  if (is.null(taxon_columns) || length(taxon_columns) == 0) {
+    stop("formatted_data has no $taxon_columns; regenerate it with the current Format_BaHZING().")
+  }
+
   #Create outcome dataframe
-  # Matches both the greengenes-style "k__" (kingdom) and SILVA/QIIME2-style
-  # "d__" (domain) taxonomy prefixes, since input data may use either.
-  Y <- exposure_covar_dat[, grep("^[kd]__", names(exposure_covar_dat))]
+  Y <- exposure_covar_dat[, taxon_columns]
   N <- nrow(Y)
   R <- ncol(Y)
-  #Genus
-  GenusData <- as.data.frame(t(formatted_data$Species.Genus.Matrix))
-  Genus.R <- ncol(GenusData)
-  numGenusPerSpecies <- as.numeric(apply(GenusData, 1, sum))
-  #Family
-  FamilyData <- as.data.frame(t(formatted_data$Genus.Family.Matrix))
-  Family.R <- ncol(FamilyData)
-  numFamilyPerGenus <- as.numeric(apply(FamilyData, 1, sum))
-  #Order
-  OrderData <- as.data.frame(t(formatted_data$Family.Order.Matrix))
-  Order.R <- ncol(OrderData)
-  numOrderPerorder <- as.numeric(apply(OrderData, 1, sum))
-  #Class
-  ClassData <- as.data.frame(t(formatted_data$Order.Class.Matrix))
-  Class.R <- ncol(ClassData)
-  numClassPerOrder <- as.numeric(apply(ClassData, 1, sum))
-  #Phylum
-  PhylumData <- as.data.frame(t(formatted_data$Class.Phylum.Matrix))
-  Phylum.R <- ncol(PhylumData)
-  numPhylumPerClass <- as.numeric(apply(PhylumData, 1, sum))
+
+  # One data.frame + taxon-count per level except the narrowest (species-role)
+  # level, e.g. GenusData/Genus.R, FamilyData/Family.R, ... - read from the
+  # binary incidence matrices Format_BaHZING() built, keyed generically via
+  # hierarchy_matrix_name() so this never has to hardcode a level name.
+  level_data <- list()
+  for (i in seq_len(length(taxa_levels) - 1)) {
+    lvl <- taxa_level_name(taxa_levels, i)
+    mat_name <- hierarchy_matrix_name(taxa_levels, i)
+    if (is.null(formatted_data[[mat_name]])) {
+      stop(sprintf("formatted_data is missing '%s'; regenerate it with Format_BaHZING().", mat_name))
+    }
+    df <- as.data.frame(t(formatted_data[[mat_name]]))
+    level_data[[lvl]] <- list(data = df, R = ncol(df))
+  }
 
   # 5. Return "Sanity" Messages ----
   if(verbose == TRUE){
@@ -534,11 +627,12 @@ BaHZING_Model <- function(formatted_data,
     message(paste0("- Number of exposures: ", P))
 
     message("Microbiome Data:")
-    message(paste0("- Number of unique genus in data: ",  Genus.R))
-    message(paste0("- Number of unique family in data: ", Family.R))
-    message(paste0("- Number of unique order in data: ",  Order.R))
-    message(paste0("- Number of unique class in data: ",  Class.R))
-    message(paste0("- Number of unique phylum in data: ", Phylum.R))
+    # Narrowest (of the non-species-role levels) to broadest, e.g.
+    # genus, family, order, class, phylum for the default hierarchy -
+    # rev() of level_data's broadest-first insertion order above.
+    for (lvl in rev(names(level_data))) {
+      message(paste0("- Number of unique ", tolower(lvl), " in data: ", level_data[[lvl]]$R))
+    }
 
     message("#### Running BaHZING with the following parameters #### ")
     if (exposure_standardization == "standard_normal"){
@@ -553,87 +647,86 @@ BaHZING_Model <- function(formatted_data,
   }
 
   # 6. Run Model ----
-  BHRM.microbiome <- .bahzing_build_model_text(has_covar = !is.null(covar))
+  BHRM.microbiome <- .bahzing_build_model_text(taxa_levels, has_covar = !is.null(covar))
 
-  jdata <- list(N=N, Y=Y, R=R, X.q=X.q, P=P,
-                GenusData=GenusData, Genus.R=Genus.R,
-                Family.R=Family.R, FamilyData=FamilyData,
-                Order.R=Order.R, OrderData=OrderData,
-                Class.R=Class.R, ClassData=ClassData,
-                Phylum.R=Phylum.R, PhylumData=PhylumData,
-                profiles=profiles)
+  ### Run JAGs Estimation ----
+  # set up for JAGs based on taxonomy
+  jdata <- list(N=N, Y=Y, R=R, X.q=X.q, P=P, profiles=profiles)
+  for (lvl in names(level_data)) {
+    jdata[[paste0(lvl, "Data")]] <- level_data[[lvl]]$data
+    jdata[[paste0(lvl, ".R")]] <- level_data[[lvl]]$R
+  }
   if (!is.null(covar)) {
     jdata$Q <- Q
     jdata$W <- W
   }
 
-  var.s <- c("species.beta", "genus.beta", "family.beta", "order.beta",
-             "class.beta", "phylum.beta", "species.beta.zero",
-             "genus.beta.zero", "family.beta.zero", "order.beta.zero",
-             "class.beta.zero", "phylum.beta.zero","species.psi","genus.psi",
-             "family.psi","order.psi","class.psi","phylum.psi",
-             "species.psi.zero","genus.psi.zero","family.psi.zero",
-             "order.psi.zero","class.psi.zero","phylum.psi.zero",
+  # Narrowest -> broadest prefix order, matching the original hardcoded var.s
+  # (e.g. species, genus, family, order, class, phylum for the default
+  # hierarchy): narrowest_level first, then level_data's names (broadest ->
+  # narrowest insertion order, built in section 4) reversed.
+  level_prefixes <- tolower(c(narrowest_level, rev(names(level_data))))
+  var.s <- c(paste0(level_prefixes, ".beta"), paste0(level_prefixes, ".beta.zero"),
+             paste0(level_prefixes, ".psi"), paste0(level_prefixes, ".psi.zero"),
              "disp")
 
-  ### Run JAGs Estimation, in parallel across the n.chains independent chains ----
-  # The n.chains chains are statistically independent - previously run
-  # sequentially inside one jags.model(..., n.chains=n.chains) call on a
-  # single core. Each chain is now compiled and sampled in its own forked
-  # process via parallel::mclapply, one core per chain.
-  if (is.null(jags_inits)) {
-    # Without an explicit seed, each chain still needs a distinct RNG seed
-    # decided here in the parent process before forking - a forked child's
-    # RNG state is otherwise copied identically from the parent, which would
-    # give every "independent" chain the same draws.
-    chain_seeds <- sample.int(1e6, n.chains)
-    jags_inits <- lapply(chain_seeds, function(s) {
+  use_parallel <- isTRUE(parallel) && .Platform$OS.type != "windows" &&
+    n.cores > 1L && n.chains > 1L
+
+  if (use_parallel && is.null(chain_inits)) {
+    # Forked processes inherit the parent's state. Give JAGS a distinct,
+    # parent-generated RNG seed for each chain even when reproducibility was
+    # not requested, so separate chains cannot accidentally start alike.
+    chain_seeds <- sample.int(.Machine$integer.max - 1L, n.chains)
+    chain_inits <- lapply(chain_seeds, function(s) {
       list(.RNG.name = "base::Wichmann-Hill", .RNG.seed = s)
     })
   }
 
-  run_one_chain <- function(i) {
-    m <- jags.model(file=textConnection(BHRM.microbiome), data=jdata,
-                    inits=list(jags_inits[[i]]), n.chains=1, n.adapt=n.adapt,
-                    quiet=TRUE)
-    update(m, n.iter=n.iter.burnin, progress.bar="none")
-    chain <- coda.samples(model=m, variable.names=var.s, n.iter=n.iter.sample,
-                          thin=1, progress.bar="none")
-    chain[[1]]
-  }
+  if (use_parallel) {
+    chain_list <- parallel::mclapply(seq_len(n.chains), function(chain_index) {
+      chain_model <- jags.model(file=textConnection(BHRM.microbiome),
+                                data=jdata,
+                                n.chains=1,
+                                n.adapt=n.adapt,
+                                quiet=TRUE,
+                                inits=chain_inits[[chain_index]])
+      update(chain_model, n.iter=n.iter.burnin, progress.bar="none")
+      chain <- coda.samples(model=chain_model,
+                            variable.names=var.s,
+                            n.iter=n.iter.sample,
+                            thin=1,
+                            progress.bar="none")
+      chain[[1L]]
+    }, mc.cores = n.cores)
 
-  detected_cores <- parallel::detectCores()
-
-  if (is.na(detected_cores) || detected_cores < 1L) {
-    detected_cores <- 1L}
-  
-  n_cores <- min(n.chains, detected_cores)
-
-  chain_list <- if (n_cores == 1L || .Platform$OS.type == "windows") {
-  lapply(seq_len(n.chains), run_one_chain)
+    # mclapply records a failed fork as a try-error. Report the underlying
+    # chain error directly instead of allowing a later, misleading
+    # "Arguments must be mcmc objects" failure from coda.
+    failed <- vapply(chain_list, inherits, logical(1), what = "try-error")
+    if (any(failed)) {
+      messages <- vapply(chain_list[failed], function(x) {
+        condition <- attr(x, "condition")
+        if (is.null(condition)) as.character(x) else conditionMessage(condition)
+      }, character(1))
+      stop("Parallel chain(s) failed: ",
+           paste(unique(messages), collapse = "; "))
+    }
+    model.fit <- coda::as.mcmc.list(chain_list)
   } else {
-  parallel::mclapply(
-    seq_len(n.chains),
-    run_one_chain,
-    mc.cores = n_cores
-  )
+    model.fit <- jags.model(file=textConnection(BHRM.microbiome),
+                            data=jdata,
+                            n.chains=n.chains,
+                            n.adapt=n.adapt,
+                            quiet=F,
+                            inits=chain_inits)
+    update(model.fit, n.iter=n.iter.burnin, progress.bar="text")
+    model.fit <- coda.samples(model=model.fit,
+                              variable.names=var.s,
+                              n.iter=n.iter.sample,
+                              thin=1,
+                              progress.bar="text")
   }
-  # mclapply returns a try-error object per-fork on failure instead of
-  # propagating it - surface that clearly instead of failing downstream with
-  # a confusing coda/as.mcmc.list error. A try-error is a character vector
-  # (not a condition object), with the actual condition stashed in its
-  # "condition" attribute, so conditionMessage() can't be called on it
-  # directly - that itself errors ("$ operator is invalid for atomic
-  # vectors"), masking the real failure.
-  failed <- vapply(chain_list, function(x) inherits(x, "try-error"), logical(1))
-  if (any(failed)) {
-    msgs <- vapply(chain_list[failed], function(x) {
-      cond <- attr(x, "condition")
-      if (!is.null(cond)) conditionMessage(cond) else as.character(x)
-    }, character(1))
-    stop("Parallel chain(s) failed: ", paste(unique(msgs), collapse = "; "))
-  }
-  model.fit <- coda::as.mcmc.list(chain_list)
 
   # 7. summarize results -------------------------------------------------------
   ## Calculate Mean, SD, and quantiles ----
@@ -710,12 +803,14 @@ BaHZING_Model <- function(formatted_data,
   #          OR.ul=exp(X97.5.))
 
   #Format output names
-  phylum   <- colnames(PhylumData)
-  class    <- colnames(ClassData)
-  order    <- colnames(OrderData)
-  family   <- colnames(FamilyData)
-  genus    <- colnames(GenusData)
-  species  <- colnames(Y)
+  # One taxon-name vector per level, keyed by level name (proper case, e.g.
+  # "Genus") - narrowest level uses Y's colnames (the actual outcome/species
+  # columns), every other level uses its level_data data.frame's colnames
+  # (built in section 4).
+  level_labels <- lapply(taxa_levels, function(lvl) {
+    if (identical(lvl, narrowest_level)) colnames(Y) else colnames(level_data[[lvl]]$data)
+  })
+  names(level_labels) <- taxa_levels
   exposure <- colnames(X)
   results2$taxa_index <- str_remove(rn_results2,"..*\\[")
   results2$taxa_index <- str_remove(results2$taxa_index,",.*$")
@@ -731,23 +826,37 @@ BaHZING_Model <- function(formatted_data,
   results2$Exposure.Index <- str_remove(results2$Exposure.Index,"]")
   results2$Exposure.Index <- as.numeric(results2$Exposure.Index)
 
+  # Resolve which taxonomic level a JAGS parameter row belongs to, from its
+  # rowname's "<level>."-prefixed parameter name (e.g. "genus.beta[12,1]" ->
+  # "Genus") - anchored to the start of the parameter name so a level whose
+  # name is a substring of another's can't silently mis-attribute (`stop()`s
+  # instead). "disp"/"omega" rows have no level prefix at all - they're
+  # dispersion/legacy parameters computed per narrowest-level taxon, so they
+  # resolve to the narrowest level, matching the original model's behavior.
+  resolve_level_for_row <- function(rowname) {
+    if (grepl("disp", rowname) || grepl("omega", rowname)) {
+      return(narrowest_level)
+    }
+    lower_levels <- tolower(taxa_levels)
+    hits <- taxa_levels[vapply(lower_levels, function(p) {
+      grepl(paste0("^", p, "\\."), rowname)
+    }, logical(1))]
+    if (length(hits) == 0) {
+      stop(sprintf("Unrecognized taxonomic parameter '%s' (taxa_levels: %s).",
+                   rowname, paste(taxa_levels, collapse = ", ")))
+    }
+    if (length(hits) > 1) {
+      stop(sprintf("Ambiguous taxonomic parameter '%s' matches multiple levels: %s.",
+                   rowname, paste(hits, collapse = ", ")))
+    }
+    hits
+  }
 
-  results2 <- results2 %>%
-    mutate(taxa_full=case_when(
-      grepl("phylum",rn_results2) ~ paste0(phylum[taxa_index]),
-      grepl("class"  ,rn_results2) ~ paste0(class[taxa_index]),
-      grepl("order"  ,rn_results2) ~ paste0(order[taxa_index]),
-      grepl("family" ,rn_results2) ~ paste0(family[taxa_index]),
-      grepl("genus"  ,rn_results2) ~ paste0(genus[taxa_index]),
-      grepl("species",rn_results2) ~ paste0(species[taxa_index])),
-      domain=case_when(
-        grepl("phylum" ,rn_results2)  ~ "Phylum",
-        grepl("class"  ,rn_results2)   ~ "Class",
-        grepl("order"  ,rn_results2)   ~ "Order",
-        grepl("family" ,rn_results2)  ~ "Family",
-        grepl("genus"  ,rn_results2)   ~ "Genus",
-        grepl("species",rn_results2) ~ "Species"),
-      exposure=paste0(exposure[Exposure.Index]))
+  row_levels <- vapply(rownames(results2), resolve_level_for_row, character(1), USE.NAMES = FALSE)
+  results2$domain <- row_levels
+  results2$taxa_full <- mapply(function(lvl, idx) level_labels[[lvl]][idx],
+                               row_levels, results2$taxa_index)
+  results2$exposure <- paste0(exposure[results2$Exposure.Index])
 
   # Modify Exposure variable
   results2 <- results2 %>%
@@ -757,13 +866,9 @@ BaHZING_Model <- function(formatted_data,
       #grepl("omega",rn_results2) ~ "Omega",
       TRUE ~ exposure))
 
-  # Get Taxa and domain information for
+  # Get Taxa name from full taxonomic string
   results2 <- results2 %>%
-    mutate(taxa_full=ifelse(grepl("disp", rn_results2),paste0(species[taxa_index]),taxa_full),
-           taxa_full=ifelse(grepl("omega",rn_results2),paste0(species[taxa_index]),taxa_full),
-           taxa_name = sub(".*__", "", taxa_full),
-           domain = ifelse(exposure == "Dispersion" | exposure == "Omega",
-                           "Species", domain))
+    mutate(taxa_name = sub(".*__", "", taxa_full))
 
   # Remove "disp" and "omega" estimates
   if(!return_all_estimates){

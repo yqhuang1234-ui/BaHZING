@@ -17,11 +17,6 @@ in R code analysis.
 ## Test environments
 
 * Local: macOS Sequoia 15.7.4, R 4.5.2
-* GitHub Actions: macOS, R-release
-* GitHub Actions: Windows, R-release
-* GitHub Actions: Ubuntu Linux, R-devel
-* GitHub Actions: Ubuntu Linux, R-release
-* GitHub Actions: Ubuntu Linux, R-oldrel
 
 ## Notes
 

@@ -46,12 +46,17 @@ pak::pak("Goodrich-Lab/BaHZING")
 The BaHZING formatting function requires a phyloseq object as the input.
 Ensure that your phyloseq object adheres to the required format. Refer
 to the phyloseq documentation for details on creating and manipulating
-phyloseq objects. For covariates in phyloseq object: All categorical
-covariates must be formatted as binary indicator variables rather than
-categorical or factor variables. For missing data: Ensure that there are
-no NA values in your data, perform the necessary filtering or imputation
-methods necessary to handle these values as BaHZING cannot function with
-missing data.
+phyloseq objects. By default, BaHZING uses
+`c("Phylum", "Class", "Order", "Family", "Genus", "Species")`. A
+different hierarchy can be supplied through the `taxa_levels` argument,
+ordered from broadest to narrowest. At least two levels are required,
+and each level except the narrowest must already be present in the
+object’s taxonomy table. For covariates in phyloseq object: All
+categorical covariates must be formatted as binary indicator variables
+rather than categorical or factor variables. For missing data: Ensure
+that there are no NA values in your data, perform the necessary
+filtering or imputation methods necessary to handle these values as
+BaHZING cannot function with missing data.
 
 ## Output
 
@@ -85,6 +90,12 @@ data("iHMP_Reduced")
 ### Format microbiome data
 formatted_data <- Format_BaHZING(iHMP_Reduced)
 
+# Example of a shorter custom hierarchy:
+# formatted_data <- Format_BaHZING(
+#   iHMP_Reduced,
+#   taxa_levels = c("Phylum", "Class", "Order", "Genus")
+# )
+
 ### Perform Bayesian hierarchical zero-inflated negative binomial regression with g-computation
 ### Specify a mixture of exposures
 x <- c("soft_drinks_dietnum",
@@ -113,7 +124,8 @@ bahzing_resout <- BaHZING_Model(formatted_data,
                          n.chains = 1,
                          n.adapt = 60,
                          n.iter.burnin = 2,
-                         n.iter.sample = 50)
+                         n.iter.sample = 50,
+                         seed = 123)
 #> #### Checking input data ####
 #> Exposure and Covariate Data:
 #> - Total sample size: 105
@@ -131,8 +143,8 @@ bahzing_resout <- BaHZING_Model(formatted_data,
 #>    Allocating nodes
 #> Graph information:
 #>    Observed stochastic nodes: 23310
-#>    Unobserved stochastic nodes: 26980
-#>    Total graph size: 350781
+#>    Unobserved stochastic nodes: 27092
+#>    Total graph size: 346911
 #> 
 #> Initializing model
 ```
@@ -165,4 +177,4 @@ ggplot(family_res_out, aes(x = estimate, y = taxa_name, color = p_Dir_sig)) +
        color = "Probability of Direction")
 ```
 
-<img src="man/figures/README-unnamed-chunk-1-1.png" width="100%" />
+<img src="man/figures/README-unnamed-chunk-1-1.png" alt="" width="100%" />
