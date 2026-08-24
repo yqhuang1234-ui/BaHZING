@@ -157,3 +157,87 @@ test_that("chain controls are validated before model fitting", {
     "n.cores must be NULL or a positive integer"
   )
 })
+
+test_that("BaHZING_Model fits a nonconsecutive four-level hierarchy", {
+  data("iHMP_Reduced")
+
+  custom_levels <- c("Phylum", "Family", "Genus", "Species")
+  formatted_data <- Format_BaHZING(iHMP_Reduced, taxa_levels = custom_levels)
+  results <- BaHZING_Model(
+    formatted_data = formatted_data,
+    x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum"),
+    covar = NULL,
+    exposure_standardization = "standard_normal",
+    n.chains = 1,
+    n.adapt = 60,
+    n.iter.burnin = 2,
+    n.iter.sample = 2,
+    counterfactual_profiles = c(-0.5, 0.5),
+    verbose = FALSE
+  )
+
+  testthat::expect_equal(ncol(results), 11)
+  testthat::expect_true(all(unique(results$domain) %in% custom_levels))
+  testthat::expect_true(all(custom_levels %in% unique(results$domain)))
+  testthat::expect_false(anyNA(results$domain))
+})
+
+test_that("taxon_columns matches the legacy k__ column selection", {
+  data("iHMP_Reduced")
+
+  formatted_data <- Format_BaHZING(iHMP_Reduced)
+  exposure_covar_dat <- data.frame(formatted_data$Table)
+  legacy_columns <- names(exposure_covar_dat)[
+    grep("k__", names(exposure_covar_dat))
+  ]
+
+  testthat::expect_true(length(formatted_data$taxon_columns) > 0)
+  testthat::expect_equal(
+    sort(formatted_data$taxon_columns), sort(legacy_columns)
+  )
+})
+
+test_that("BaHZING_Model works without a Kingdom or Domain column", {
+  data("iHMP_Reduced")
+
+  PS <- iHMP_Reduced
+  tt <- tax_table(PS)
+  tax_table(PS) <- tt[, colnames(tt) != "Domain"]
+  formatted_data <- Format_BaHZING(PS)
+
+  testthat::expect_equal(length(formatted_data$taxon_columns), 222)
+  testthat::expect_false(any(grepl("k__", formatted_data$taxon_columns)))
+
+  results <- BaHZING_Model(
+    formatted_data = formatted_data,
+    x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum"),
+    covar = NULL,
+    exposure_standardization = "standard_normal",
+    n.chains = 1,
+    n.adapt = 60,
+    n.iter.burnin = 2,
+    n.iter.sample = 2,
+    counterfactual_profiles = c(-0.5, 0.5),
+    verbose = FALSE
+  )
+
+  testthat::expect_equal(ncol(results), 11)
+  testthat::expect_equal(length(unique(
+    results$taxa_full[results$domain == "Species"]
+  )), 222)
+})
+
+test_that("BaHZING_Model requires taxon_columns metadata", {
+  data("iHMP_Reduced")
+
+  formatted_data <- Format_BaHZING(iHMP_Reduced)
+  formatted_data$taxon_columns <- NULL
+
+  testthat::expect_error(
+    BaHZING_Model(
+      formatted_data,
+      x = c("soft_drinks_dietnum", "diet_soft_drinks_dietnum")
+    ),
+    "no \\$taxon_columns"
+  )
+})

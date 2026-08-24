@@ -5,5 +5,13 @@
 .DS_Store
 temp*.txt
 tests/testthat/testthat-problems.rds
+doc/
+vignettes/*.html
+vignettes/*.R
+inst/doc/
+dev/*.html
+dev/*.knit.md
+.claude/
+presentation/
 *.Rcheck/
 *.tar.gz
